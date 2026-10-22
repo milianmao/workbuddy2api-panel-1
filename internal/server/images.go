@@ -64,6 +64,14 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 		model = defaultImageModel
 	}
 	realm, bare := resolveModel(model)
+	// models.aliases（issue #30）在图像入口同样生效：客户端名 → 真实名，realm 按目标
+	// 重解析（别名值可带前缀跨域指向）。口径与 chat 一致——放在 hidden 检查之前
+	// （被映射到的目标仍受黑名单约束），且必须放在 req["model"]=bare 之前，否则
+	// 别名会漏进出站报文：上游只认裸名 hunyuan-image-alpha，收到 gpt-image-* 直接 4xx。
+	if aliasTarget, aliased := h.modelAlias(realm, bare); aliased && aliasTarget != "" {
+		log.Printf("INFO: [server] image model alias applied: %s -> %s", model, aliasTarget)
+		realm, bare = resolveModel(aliasTarget)
+	}
 	// models.hidden 同一份黑名单也管出图入口：列表里已经隐藏的模型不该还能直接调。
 	if h.hiddenModel(realm, bare) {
 		writeOpenAIError(w, http.StatusBadRequest, "model_unavailable",
