@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
@@ -419,5 +420,64 @@ func TestImagesFailFastOnAccountIndependentErrors(t *testing.T) {
 				t.Errorf("与账号无关的错误不得换号重试：打了 %d 次上游（want 1）", len(f.paths))
 			}
 		})
+	}
+}
+
+// TestImagesAliasMappedToRealModel 图像入口同样吃 models.aliases（issue #30 复用）：
+// 客户端名在**出站前**换成真实裸名，realm 按别名值重解析。
+//
+// 场景来源：sub2api 的 /v1/images/* 只认 "gpt-image-*" 前缀，且对“映射后的上游名”
+// 再校验一次，所以 hunyuan-image-alpha 这类真实上游名进不去；网关侧加一条别名即可对上。
+// 断言点两条：① 落到 cn 池的 /v2/images/generations；② 出站 body 的 model 是裸名
+// ——别名绝不能漏给上游（上游只认裸名，漏出去就是 4xx + 一个不该存在的模型名指纹）。
+func TestImagesAliasMappedToRealModel(t *testing.T) {
+	f := &imageFake{status: 200, body: imageOK}
+	h := NewHandler(Config{
+		Pool:     imagePool(),
+		Upstream: f.client(),
+		Live: livecfg.New(livecfg.Snapshot{ModelAliases: livecfg.NormalizeModelAliases(
+			[]string{"gpt-image-2.5-flare=cn:hunyuan-image-alpha"})}),
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/images/generations",
+		strings.NewReader(`{"model":"gpt-image-2.5-flare","prompt":"一只猫","size":"1024x1024"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.paths) != 1 || f.paths[0] != "/v2/images/generations" || f.hosts[0] != "cn.example" {
+		t.Fatalf("落点 %v@%v want /v2/images/generations @ cn.example", f.paths, f.hosts)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal([]byte(f.bodies[0]), &sent); err != nil {
+		t.Fatalf("出站 body 解析失败: %v", err)
+	}
+	if sent["model"] != "hunyuan-image-alpha" {
+		t.Fatalf("上游收到的 model=%v want 真实裸名（别名不得漏出网关）", sent["model"])
+	}
+	if sent["size"] != "1024x1024" {
+		t.Fatalf("其余字段应原样透传，size=%v", sent["size"])
+	}
+}
+
+// TestImagesAliasTargetHiddenRejected 别名不能绕过 models.hidden：目标被隐藏时同样拒绝。
+func TestImagesAliasTargetHiddenRejected(t *testing.T) {
+	f := &imageFake{status: 200, body: imageOK}
+	h := NewHandler(Config{
+		Pool:     imagePool(),
+		Upstream: f.client(),
+		Live: livecfg.New(livecfg.Snapshot{
+			ModelAliases: livecfg.NormalizeModelAliases(
+				[]string{"gpt-image-2.5-flare=cn:hunyuan-image-alpha"}),
+			HiddenModels: livecfg.NormalizeHiddenModels([]string{"cn:hunyuan-image-alpha"}),
+		}),
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/images/generations",
+		strings.NewReader(`{"model":"gpt-image-2.5-flare","prompt":"一只猫"}`)))
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "hidden") {
+		t.Fatalf("别名目标被隐藏应 400 model_unavailable，实际 code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(f.paths) != 0 {
+		t.Fatalf("被拒请求不应打到上游，实际 %v", f.paths)
 	}
 }
