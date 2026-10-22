@@ -89,6 +89,24 @@ var sanitizeRewrites = [][2]string{
 // （见 sanitizeTextWith：sanitize_brand_scope=all 时所有角色都用，identity 时只用身份消息）。
 var sanitizeIdentityRewrites = [][2]string{
 	{
+		// 本仓补丁：整句规则与品牌词同属 identity 作用域（sanitize_brand_scope 生效），
+		// 且须排在品牌词规则之前 —— 品牌词先被替换后整句就再也匹配不到了。
+	{
+		// DeepSeek Harness 在 system 首句注入的固定身份声明
+		// （"You are an AI agent powered by DeepSeek Harness."）。上游按该句识别
+		// 非官方渠道并回 400 code=11-128（issue #1 / 社区 PR #2）。
+		//
+		// 整句改写而非只换一个词：本仓库实测上游按短 token 匹配（连裸键名
+		// x-anthropic-billing-hdr 都会触发 11-128），故仅换措辞（如 powered→running on）
+		// 若保留 "DeepSeek Harness" 字样仍会被拦；零宽空格方案亦被实测证伪
+		// （上游会做 Unicode 归一化，见 11-128 条目注释；社区 PR #47 因此未合并）。
+		// 替换为新版 CodeBuddy 的默认身份首句：请求体中不再出现任何 DeepSeek Harness
+		// 痕迹，且下游看到的是一句完整的官方身份声明（由宿主提供，非模型自称）。
+		// 匹配串不带结尾标点：句号 / 逗号 / 换行 / 直接结尾四种形态一并覆盖，
+		// 原有标点与后继内容原样保留。
+		"You are an AI agent powered by DeepSeek Harness",
+		"You are CodeBuddy Code",
+	},
 		// DSH 的身份句（@deepseek-ai/dsh-system-prompt 注入的 harness:identity 段）被上游
 		// 当成「非官方渠道调用」整单拦截：400 11-128 Illegal API invocation from an
 		// unapproved channel。实测换一词即绕过（与插 U+200B 等效，但可见、可 diff）。
