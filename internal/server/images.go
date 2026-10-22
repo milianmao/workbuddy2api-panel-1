@@ -95,6 +95,16 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 		model = defaultImageModel
 	}
 	realm, bare := resolveModel(model)
+	// models.aliases（issue #30）在图像入口同样生效：客户端名 → 真实名，realm 按目标
+	// 重解析（别名值可带前缀跨域指向）。口径与 chat 一致——放在 hidden 检查之前
+	// （被映射到的目标仍受黑名单约束），且必须放在 req["model"]=bare 之前，否则
+	// 别名会漏进出站报文：上游只认裸名 hunyuan-image-alpha，收到 gpt-image-* 直接 4xx。
+	// 顺序上必须在白名单之前：别名解析出的真实目标才是要接受白名单检查的对象，
+	// 否则改个客户端名就能绕过白名单。
+	if aliasTarget, aliased := h.modelAlias(realm, bare); aliased && aliasTarget != "" {
+		log.Printf("INFO: [server] image model alias applied: %s -> %s", model, aliasTarget)
+		realm, bare = resolveModel(aliasTarget)
+	}
 	// models.allowed 白名单（issue #68）：与 chat 入口同款拒绝，不打上游、不占选号。
 	// 未点名模型时先做白名单内兜底（设计决策 4）：默认模型不在白名单时改选
 	// 白名单内第一个可用出图模型；白名单内无出图模型则维持默认名落入拒绝
