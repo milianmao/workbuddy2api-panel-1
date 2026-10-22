@@ -50,6 +50,22 @@ var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 // 以免误伤 TestExactMatchOnlyVariantNotTouched 所保护的零散文本。
 var sanitizeRewrites = [][2]string{
 	{
+		// DeepSeek Harness 在 system 首句注入的固定身份声明
+		// （"You are an AI agent powered by DeepSeek Harness."）。上游按该句识别
+		// 非官方渠道并回 400 code=11-128（issue #1 / 社区 PR #2）。
+		//
+		// 整句改写而非只换一个词：本仓库实测上游按短 token 匹配（连裸键名
+		// x-anthropic-billing-hdr 都会触发 11-128），故仅换措辞（如 powered→running on）
+		// 若保留 "DeepSeek Harness" 字样仍会被拦；零宽空格方案亦被实测证伪
+		// （上游会做 Unicode 归一化，见 11-128 条目注释；社区 PR #47 因此未合并）。
+		// 替换为新版 CodeBuddy 的默认身份首句：请求体中不再出现任何 DeepSeek Harness
+		// 痕迹，且下游看到的是一句完整的官方身份声明（由宿主提供，非模型自称）。
+		// 匹配串不带结尾标点：句号 / 逗号 / 换行 / 直接结尾四种形态一并覆盖，
+		// 原有标点与后继内容原样保留。
+		"You are an AI agent powered by DeepSeek Harness",
+		"You are CodeBuddy Code",
+	},
+	{
 		"You are Claude Code, Anthropic's official CLI for Claude",
 		"You are Claude Code, Anthropic's official CLI tool for Claude",
 	},

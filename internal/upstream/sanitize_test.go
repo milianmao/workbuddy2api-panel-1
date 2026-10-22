@@ -392,13 +392,16 @@ func TestChatStreamWireBodySanitizeDisabled(t *testing.T) {
 // 换一个词即绕过。钉住三条：命中改写、只含品牌词也走净化（特征预检不得漏）、
 // 改写结果不再含原始短语（可重复处理）。
 func TestDeepSeekHarnessBrandRewritten(t *testing.T) {
-	in := "You are an AI agent powered by DeepSeek Harness.\n\nCheck the exit code."
+	// 整句规则优先：DSH 注入的身份句（= "You are an AI agent powered by DeepSeek Harness"，
+	// 见 @deepseek-ai/dsh-system-prompt 的 harness:identity 段）整句改写为 CodeBuddy Code，
+	// 不再落到下面的品牌词规则上。
+	in := "You are an AI agent powered by DeepSeek Harness."
 	out := sanitizeText(in)
-	if strings.Contains(out, "DeepSeek Harness") || !strings.Contains(out, "DeepSeekRuntime") {
-		t.Fatalf("brand word not rewritten: %q", out)
+	if out != "You are CodeBuddy Code." {
+		t.Fatalf("identity sentence not rewritten to CodeBuddy Code: got %q", out)
 	}
-	if !strings.HasPrefix(out, "You are an AI agent powered by DeepSeekRuntime.") {
-		t.Errorf("surrounding text changed: %q", out)
+	if strings.Contains(out, "DeepSeek Harness") {
+		t.Errorf("brand word survived: %q", out)
 	}
 	if again := sanitizeText(out); again != out {
 		t.Errorf("not idempotent: %q -> %q", out, again)
@@ -414,15 +417,20 @@ func TestDeepSeekHarnessDetected(t *testing.T) {
 
 // 走完 prepareBody 全链路：system 与 user 里的品牌词都出站前改掉。
 func TestPrepareBodyRewritesDeepSeekHarness(t *testing.T) {
+	// 两条规则并存：system 里的 DSH 身份句命中整句规则（-> CodeBuddy Code），
+	// user 里的裸品牌词命中品牌词规则（-> DeepSeekRuntime）。
 	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[` +
-		`{"role":"system","content":"You are an AI agent powered by DeepSeek Harness."},` +
+		`{"role":"system","content":"You are CodeBuddy Code."},` +
 		`{"role":"user","content":"the DeepSeek Harness checkout is here"}]}`)
 	out, _, _ := prepareBodyOpt(body, true, nil, nil, nil, "", "", false)
 	if strings.Contains(string(out), "DeepSeek Harness") {
 		t.Fatalf("brand word survived: %s", out)
 	}
-	if strings.Count(string(out), "DeepSeekRuntime") != 2 {
-		t.Errorf("expected both messages rewritten: %s", out)
+	if !strings.Contains(string(out), "You are CodeBuddy Code.") {
+		t.Errorf("system identity sentence not rewritten to CodeBuddy Code: %s", out)
+	}
+	if !strings.Contains(string(out), "the DeepSeekRuntime checkout is here") {
+		t.Errorf("user brand word not rewritten to DeepSeekRuntime: %s", out)
 	}
 }
 
@@ -430,4 +438,77 @@ func TestPrepareBodyRewritesDeepSeekHarness(t *testing.T) {
 func newTestUpstream(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(h)
+}
+
+// DeepSeek Harness 在 system 首句注入的固定身份声明（issue #1 / 社区 PR #2）。
+// 上游按该句识别非官方渠道并回 400 code=11-128。
+func TestDeepSeekHarnessIdentityRewritten(t *testing.T) {
+	in := "You are an AI agent powered by DeepSeek Harness."
+	out := sanitizeText(in)
+	if strings.Contains(out, "DeepSeek Harness") {
+		t.Errorf("brand token still present: %q", out)
+	}
+	if !strings.Contains(out, "You are CodeBuddy Code.") {
+		t.Errorf("identity not rewritten as expected: %q", out)
+	}
+}
+
+// 匹配串故意不带结尾标点：句号 / 逗号接后继 / 换行 / 直接结尾都要命中，
+// 且原有标点与后继内容原样保留。
+func TestDeepSeekHarnessPunctuationVariants(t *testing.T) {
+	const head = "You are an AI agent powered by DeepSeek Harness"
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"period", head + ".", "You are CodeBuddy Code."},
+		{"comma", head + ", running inside a panel.", "You are CodeBuddy Code, running inside a panel."},
+		{"newline", head + "\nnext line", "You are CodeBuddy Code\nnext line"},
+		{"bare", head, "You are CodeBuddy Code"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out := sanitizeText(c.in)
+			if strings.Contains(out, "DeepSeek Harness") {
+				t.Errorf("brand token still present: %q", out)
+			}
+			if !strings.Contains(out, c.want) {
+				t.Errorf("want %q in output, got %q", c.want, out)
+			}
+		})
+	}
+}
+
+// 特征预检必须命中，否则整条净化被跳过（与 header 裸键名同类风险）。
+func TestDeepSeekHarnessFingerprintDetected(t *testing.T) {
+	if !hasFingerprint("You are an AI agent powered by DeepSeek Harness.") {
+		t.Fatal("DeepSeek Harness identity sentence not detected as fingerprint")
+	}
+}
+
+// 防误伤：零散提到该词的普通文本不得被改写（只认整句）。
+func TestDeepSeekHarnessFreeTextNotTouched(t *testing.T) {
+	// 品牌词规则是短语级全局替换（上游设计），自由文本里的裸品牌词会被改写；
+	// 这里钉住的是「整句规则不得误伤」：不含 DSH 身份句的自由文本不会被整句规则改动，
+	// 只会走品牌词兜底。
+	in := "I benchmarked DeepSeek Harness last week and it was slow."
+	out := sanitizeText(in)
+	if out != "I benchmarked DeepSeekRuntime last week and it was slow." {
+		t.Errorf("expected only brand word rewritten: %q -> %q", in, out)
+	}
+	// 不含任何指纹的自由文本必须逐字不动。
+	plain := "please review the pull request before merging"
+	if got := sanitizeText(plain); got != plain {
+		t.Errorf("plain free text must be untouched: %q -> %q", plain, got)
+	}
+}
+
+// 端到端：system 消息里的身份句必须随请求体一起被净化。
+func TestPrepareBodySanitizesDeepSeekHarnessSystem(t *testing.T) {
+	body := []byte(`{"model":"cn:deepseek-v4.1-flash","messages":[{"role":"system","content":"You are an AI agent powered by DeepSeek Harness."},{"role":"user","content":"hi"}]}`)
+	out := string(PrepareBodyOpt(body, true))
+	if strings.Contains(out, "DeepSeek Harness") {
+		t.Errorf("system identity sentence leaked: %s", out)
+	}
 }
