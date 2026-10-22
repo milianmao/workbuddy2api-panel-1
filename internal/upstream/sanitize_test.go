@@ -684,3 +684,82 @@ func TestPrepareBodyRewritesDshPaths(t *testing.T) {
 		t.Fatalf("出站 body 未被改写: %s", out)
 	}
 }
+// ---- 本仓补丁：DSH 身份首句整句改写（与上游品牌词规则同属 identity 作用域）----
+
+// identitySentenceRule 取本仓新增的整句规则：identity 表里唯一「以身份句开头且含品牌词」
+// 的条目。测试用表项自身的串，避免再抄一遍文案（规则与断言必须永远一致）。
+func identitySentenceRule(t *testing.T) [2]string {
+	t.Helper()
+	for _, rw := range sanitizeIdentityRewrites {
+		if strings.HasPrefix(rw[0], "You are ") && strings.Contains(rw[0], sanitizeIdentityFeatures[0]) {
+			return rw
+		}
+	}
+	t.Fatal("整句规则未进入 sanitizeIdentityRewrites")
+	return [2]string{}
+}
+
+// 作用域：identity 路径整句改写，全局路径（brand=false）原样透传 ——
+// 后者是 sanitize_brand_scope=identity 时用户消息不被改动的前提。
+func TestIdentitySentenceRespectsBrandScope(t *testing.T) {
+	rw := identitySentenceRule(t)
+	in := rw[0] + "."
+	want := rw[1] + "."
+	if got := sanitizeTextIdentity(in); got != want {
+		t.Errorf("identity 作用域应整句改写：want %q, got %q", want, got)
+	}
+	if got := sanitizeText(in); got != in {
+		t.Errorf("全局作用域不得改整句：%q -> %q", in, got)
+	}
+}
+
+// 匹配串不带结尾标点：句号 / 逗号接后继 / 换行 / 直接结尾四种形态一并覆盖，
+// 且原有标点与后继内容原样保留。
+func TestIdentitySentencePunctuationVariants(t *testing.T) {
+	rw := identitySentenceRule(t)
+	for _, c := range []struct{ name, suffix string }{
+		{"period", "."},
+		{"comma", ", running inside a panel."},
+		{"newline", "\nnext line"},
+		{"bare", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			out := sanitizeTextIdentity(rw[0] + c.suffix)
+			if !strings.HasPrefix(out, rw[1]) {
+				t.Fatalf("want prefix %q, got %q", rw[1], out)
+			}
+			if rest := strings.TrimPrefix(out, rw[1]); rest != c.suffix {
+				t.Errorf("后继内容/标点被改动：suffix %q -> %q", c.suffix, rest)
+			}
+			if strings.HasPrefix(out, rw[0]) {
+				t.Errorf("原文案仍出现在输出开头：%q", out)
+			}
+		})
+	}
+}
+
+// 预检 + 幂等：整句只含品牌词时必须命中 identity 快路径（否则整条净化被跳过）。
+func TestIdentitySentenceDetectedAndIdempotent(t *testing.T) {
+	rw := identitySentenceRule(t)
+	in := rw[0] + "."
+	if !hasIdentityFingerprint(in) {
+		t.Error("整句未命中 identity 快路径")
+	}
+	once := sanitizeTextIdentity(in)
+	if twice := sanitizeTextIdentity(once); twice != once {
+		t.Errorf("非幂等：%q -> %q", once, twice)
+	}
+}
+
+// 端到端：brandGlobal=true（默认 all）时 system 消息里的整句随请求体一起被改写。
+func TestPrepareBodySanitizesIdentitySentence(t *testing.T) {
+	rw := identitySentenceRule(t)
+	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"system","content":"` + rw[0] + `."}]}`)
+	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", nil, "", "", false)
+	if !strings.Contains(string(out), rw[1]) {
+		t.Errorf("system 整句未随请求体改写：%s", out)
+	}
+	if strings.Contains(string(out), rw[0]) {
+		t.Errorf("system 原文案仍出站：%s", out)
+	}
+}
