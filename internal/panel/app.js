@@ -509,19 +509,30 @@ function renderAccounts(list) {
     filtered = lastAccountsList.filter(s => s.realm === 'global');
   }
 
-  if (!filtered.length) {
+  // 排序在「分类过滤之后」做：行序只影响当前视图，不改变池内真实顺序。
+  const rows = sortAccounts(filtered);
+  // 勾选集去幽灵：账号被移除/重新导入后残留的 uid 会让「已选 N」虚高、批量操作空转。
+  if (accSel.size) {
+    const alive = new Set(rows.map(s => s.uid));
+    Array.from(accSel).forEach(u => { if (!alive.has(u)) accSel.delete(u); });
+  }
+  accLast = rows;
+  if (!rows.length) {
     if (!total) {
-      setHTML(tb, '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="10"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');
     } else if (accRealmFilter === 'cn') {
-      setHTML(tb, '<tr><td colspan="9"><div class="empty"><div class="big">暂无国内版账号</div>当前账号池内均为国际版账号（共 ' + globalCnt + ' 个）</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="10"><div class="empty"><div class="big">暂无国内版账号</div>当前账号池内均为国际版账号（共 ' + globalCnt + ' 个）</div></td></tr>');
     } else if (accRealmFilter === 'global') {
-      setHTML(tb, '<tr><td colspan="9"><div class="empty"><div class="big">暂无国际版账号</div>当前账号池内均为国内版账号（共 ' + cnCnt + ' 个）</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="10"><div class="empty"><div class="big">暂无国际版账号</div>当前账号池内均为国内版账号（共 ' + cnCnt + ' 个）</div></td></tr>');
+    } else {
+      setHTML(tb, '<tr><td colspan="10"><div class="empty"><div class="big">没有匹配的账号</div></div></td></tr>');
     }
+    syncAccSel();
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
-  const maxCred = Math.max(1, ...filtered.map(s => s.credits || 0));
-  setHTML(tb, filtered.map(s => {
+  const maxCred = Math.max(1, ...rows.map(s => s.credits || 0));
+  setHTML(tb, rows.map(s => {
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
@@ -594,6 +605,7 @@ function renderAccounts(list) {
       (s.api_key ? ' <span class="realm-tag">API Key</span>' : '');
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
+      '<td class="pick"><input type="checkbox" class="pk" data-u="' + esc(s.uid) + '"' + (accSel.has(s.uid) ? ' checked' : '') + ' aria-label="选择该账号"></td>' +
       '<td class="who"><div class="nm"><span class="nm-name" title="' + esc(rawWho) + '">' + nameHtml + '</span>' + tags + '</div><div class="id" title="uid: ' + esc(s.uid) + '">' + esc(short) + '</div></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
@@ -628,7 +640,58 @@ function renderAccounts(list) {
       ].map(html => html || '<span class="slot" aria-hidden="true"></span>').join('') +
       '</div></td></tr>';
   }).join(''));
+  syncAccSel();
 }
+
+/* 账号池「多选 + 排序」的模块状态。
+   声明位置刻意留在账号行渲染函数之后：internal/panel/paused_test.go 按两个函数名的
+   源码区间切片（从账号行渲染函数到 overview 加载函数）在 vm 里单测行渲染，声明若落在
+   切片之前就成了未定义变量。切片内按顺序求值、调用发生在求值之后，故两者都可见。
+   注意：本注释不要写出那两个函数名+括号的字面量，否则 indexOf 会切在这里把注释截断。 */
+let accSel = new Set();   // 已勾选的 uid
+let accSort = 'default';  // default | state | credits | success
+let accLast = [];         // 最近一次渲染用的（已排序）账号数组
+
+/* accStateRank 状态优先级，数字越小越靠前：禁用 > 暂停选号 > 冷却/限流 > 保留积分 >
+   疑似登录失效 > 可用。口径与行内徽标判定同序，避免「排序结果与徽标看起来不一致」。 */
+function accStateRank(s) {
+  if (s.disabled) return 0;
+  if (s.paused) return 1;
+  const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
+  const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
+  const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
+  if (cool > 0) return 2;
+  if (s.reserve_blocked) return 3;
+  if (s.session_dead_fails > 0) return 4;
+  return 5;
+}
+
+/* sortAccounts 返回排好序的副本（不改入参）：状态序同档内按积分降序，便于一眼挑「能用的」。
+   default 保持后端顺序（池内插入序，便于对照 auths/ 目录）。 */
+function sortAccounts(list) {
+  const arr = (list || []).slice();
+  if (accSort === 'state') {
+    arr.sort((a, b) => (accStateRank(a) - accStateRank(b)) || ((b.credits || 0) - (a.credits || 0)));
+  } else if (accSort === 'credits') {
+    arr.sort((a, b) => (b.credits || 0) - (a.credits || 0));
+  } else if (accSort === 'success') {
+    arr.sort((a, b) => (b.success_count || 0) - (a.success_count || 0));
+  }
+  return arr;
+}
+
+/* syncAccSel 把「已选 N 个」与全选框（含半选态）刷到表头。全部 $ 访问都做空值保护：
+   单测把 $ 换成 inert 代理/空函数，这里不能假设元素一定存在。 */
+function syncAccSel() {
+  const all = $('accPickAll');
+  if (all) {
+    all.checked = accLast.length > 0 && accSel.size === accLast.length;
+    all.indeterminate = accSel.size > 0 && accSel.size < accLast.length;
+  }
+  const note = $('accSelNote');
+  if (note) note.textContent = accSel.size ? accSel.size + ' / ' + accLast.length + ' 个已选' : '';
+}
+
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。后端已按
 // 「整池不可用 → 此刻没号 → 部分限流」排好序，这里只做展示（移植上游 PR #120）。
@@ -877,6 +940,44 @@ if ($('accRealmTabs')) {
     renderAccounts(lastAccountsList);
   });
 }
+
+/* ── 账号池：状态排序 + 批量暂停/恢复选号 ───────────────────────────── */
+$('accSort').onchange = e => {
+  accSort = e.target.value;
+  renderAccounts(accLast); // 只用内存快照重排，不打上游、不改池状态
+};
+
+/* 表头全选 / 全不选：只作用于当前渲染出来的账号（accLast），避免误选被筛掉的号。 */
+$('accPickAll').onchange = e => {
+  if (e.target.checked) accLast.forEach(s => accSel.add(s.uid));
+  else accSel.clear();
+  renderAccounts(accLast);
+};
+
+/* 行内勾选只改集合 + 刷表头，不重绘整表：重绘会打断连续点选（焦点、滚动位置都会跳）。 */
+$('accBody').addEventListener('change', ev => {
+  const cb = ev.target.closest('input.pk');
+  if (!cb) return;
+  if (cb.checked) accSel.add(cb.dataset.u);
+  else accSel.delete(cb.dataset.u);
+  syncAccSel();
+});
+
+/* 批量暂停/恢复选号：逐号复用单号端点（池规模 ~10²，不值得新增批量接口，且能按号独立
+   报错）。未勾选时明确提示而不动整池——批量误伤比多按一次键贵得多。 */
+async function batchPauseResume(action) {
+  if (!accSel.size) { toast('先在表头勾选账号（或点全选）', ''); return; }
+  const uids = Array.from(accSel);
+  let ok = 0, fail = 0;
+  for (const u of uids) {
+    try { await api('accounts/' + encodeURIComponent(u) + '/' + action, { method: 'POST' }); ok++; }
+    catch (e) { fail++; }
+  }
+  toast((action === 'pause' ? '已暂停选号 ' : '已恢复选号 ') + ok + ' 个' + (fail ? '，失败 ' + fail + ' 个' : ''), fail ? 'err' : 'ok');
+  loadOverview(true);
+}
+$('btnPauseSel').onclick = () => batchPauseResume('pause');
+$('btnResumeSel').onclick = () => batchPauseResume('resume');
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
 /* 实测上限标注：scripts/probe_max_tokens.py --panel-out 写入探测结果，
