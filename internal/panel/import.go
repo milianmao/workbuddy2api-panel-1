@@ -1,12 +1,15 @@
 package panel
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -34,6 +37,144 @@ type cockpitAccount struct {
 	LastUsed       int64  `json:"last_used"`
 }
 
+// cockpitWrapperKeys 是「账号数组被包在对象里」时可能出现的字段名，按优先级尝试。
+// cockpit tools 各版本导出外壳不统一：早期是裸数组，后来套过 {"accounts":[...]}、
+// {"data":{"accounts":[...]}} 这类带元数据的对象，字段名大小写也不固定。
+var cockpitWrapperKeys = []string{
+	"accounts", "account", "data", "items", "list", "result", "results",
+	"users", "rows", "records", "exported_accounts", "cockpit_accounts",
+}
+
+// cockpitCredentialKeys 用来判断一个对象是不是「单个账号」，而不是外壳。
+var cockpitCredentialKeys = []string{"access_token", "refresh_token", "uid", "email"}
+
+// utf8BOM 是记事本 / Windows 工具导出的常见前缀，json.Unmarshal 不认它。
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// parseCockpitAccounts 解析导入文件，兼容这些外壳：
+//
+//  1. 裸数组：[{...},{...}]（旧格式，仍然优先）
+//  2. 对象包数组：{"accounts":[...], "exported_at":...}
+//  3. 对象套对象：{"data":{"accounts":[...]}}
+//  4. 单个账号对象：{"uid":..., "access_token":...}（只导一个号时会这么存）
+//  5. 上面任意一种被二次编码成 JSON 字符串
+//
+// 全部不匹配时，错误里回显顶层字段名与文件开头片段，而不是只丢一句
+// "cannot unmarshal object into Go value of type []panel.cockpitAccount"
+// ——那种文案对着一份真实文件没法判断到底是哪一层套错了。
+func parseCockpitAccounts(raw []byte) ([]cockpitAccount, error) {
+	return parseCockpitAccountsDepth(raw, 0)
+}
+
+func parseCockpitAccountsDepth(raw []byte, depth int) ([]cockpitAccount, error) {
+	trimmed := bytes.TrimSpace(bytes.TrimPrefix(raw, utf8BOM))
+	if len(trimmed) == 0 {
+		return nil, errors.New("文件是空的")
+	}
+	if depth > 3 {
+		return nil, errors.New("JSON 嵌套过深，找不到账号数组")
+	}
+
+	// 1. 裸数组：cockpit tools 的经典格式，命中即用。
+	var accounts []cockpitAccount
+	if err := json.Unmarshal(trimmed, &accounts); err == nil {
+		return accounts, nil
+	}
+
+	// 5. 二次编码：整个 JSON 被当成一个字符串塞进 JSON。
+	var encoded string
+	if err := json.Unmarshal(trimmed, &encoded); err == nil {
+		return parseCockpitAccountsDepth([]byte(encoded), depth+1)
+	}
+
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &obj); err != nil {
+		return nil, fmt.Errorf("既不是 JSON 数组也不是对象: %v%s", err, rawPreview(trimmed))
+	}
+
+	// 4. 单个账号对象。
+	if looksLikeCockpitAccount(obj) {
+		var one cockpitAccount
+		if err := json.Unmarshal(trimmed, &one); err != nil {
+			return nil, fmt.Errorf("单账号对象解析失败: %v", err)
+		}
+		return []cockpitAccount{one}, nil
+	}
+
+	// 2/3. 外壳对象：按字段名找（大小写不敏感），找对了就递归下去。
+	lowered := make(map[string]json.RawMessage, len(obj))
+	for k, v := range obj {
+		lowered[strings.ToLower(k)] = v
+	}
+	var tried []string
+	for _, want := range cockpitWrapperKeys {
+		sub, ok := lowered[want]
+		if !ok {
+			continue
+		}
+		got, err := parseCockpitAccountsDepth(sub, depth+1)
+		if err == nil {
+			return got, nil // 空数组也算命中，交给上层报「文件里没有账号」
+		}
+		tried = append(tried, want)
+	}
+
+	// 6. 以 uid/id 为键的字典：{"uid-1":{...},"uid-2":{...}}（有的工具这么落盘）。
+	// 只有当**每个**值都像账号时才认，否则宁可报错也不要瞎猜。
+	dict := make([]cockpitAccount, 0, len(obj))
+	dictOK := len(obj) > 0
+	for _, v := range obj {
+		var sub map[string]json.RawMessage
+		if err := json.Unmarshal(v, &sub); err != nil || !looksLikeCockpitAccount(sub) {
+			dictOK = false
+			break
+		}
+		var one cockpitAccount
+		if err := json.Unmarshal(v, &one); err != nil {
+			dictOK = false
+			break
+		}
+		dict = append(dict, one)
+	}
+	if dictOK {
+		sort.Slice(dict, func(i, j int) bool { return dict[i].UID < dict[j].UID })
+		return dict, nil
+	}
+
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	msg := fmt.Sprintf("顶层是对象但里面没找到账号数组（现有字段: %s）%s", strings.Join(keys, ", "), rawPreview(trimmed))
+	if len(tried) > 0 {
+		msg = fmt.Sprintf("字段 %s 里都不是账号数组（顶层字段: %s）%s", strings.Join(tried, ", "), strings.Join(keys, ", "), rawPreview(trimmed))
+	}
+	return nil, errors.New(msg)
+}
+
+// looksLikeCockpitAccount 判断对象本身是不是一个账号（而不是包账号的外壳）。
+func looksLikeCockpitAccount(obj map[string]json.RawMessage) bool {
+	for k := range obj {
+		lk := strings.ToLower(k)
+		for _, want := range cockpitCredentialKeys {
+			if lk == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// rawPreview 给错误信息附一小段原文，方便人对着文件看是哪层套错了。
+func rawPreview(raw []byte) string {
+	const max = 120
+	if len(raw) > max {
+		return "；文件开头: " + string(raw[:max]) + "…"
+	}
+	return "；文件内容: " + string(raw)
+}
+
 // importCockpit 接收 cockpit tools 导出的 JSON 文件，批量导入账号到池中。
 //
 //	POST /panel/api/import/cockpit
@@ -59,13 +200,13 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var accounts []cockpitAccount
-	if err := json.Unmarshal(raw, &accounts); err != nil {
+	accounts, err := parseCockpitAccounts(raw)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
 	if len(accounts) == 0 {
-		writeErr(w, http.StatusBadRequest, "empty accounts array")
+		writeErr(w, http.StatusBadRequest, "文件里没有账号（账号数组为空）")
 		return
 	}
 
