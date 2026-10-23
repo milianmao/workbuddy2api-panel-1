@@ -10,6 +10,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -105,3 +108,99 @@ func TestImportCockpitHandlerRejectsUnparseableObject(t *testing.T) {
 		t.Fatalf("应给出可排查的中文提示: %s", got)
 	}
 }
+
+// 导入弹窗一次可选多个文件：input 必须带 multiple，处理函数必须逐个上传并汇总，
+// 单个文件失败不能连累整批（这份脚本在容器里因无 node 会 skip，在有 node 的机器上生效）。
+func TestImportUIAllowsMultipleFiles(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; import multi-file ui test skipped")
+	}
+	path := filepath.Join(t.TempDir(), "importmulti.cjs")
+	if err := os.WriteFile(path, []byte(importMultiScript), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, path, "app.js", "index.html").CombinedOutput(); err != nil {
+		t.Fatalf("import multi-file ui test failed: %v\n%s", err, out)
+	}
+}
+
+const importMultiScript = `const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const html = fs.readFileSync(process.argv[3], 'utf8');
+
+// 1) 导入框必须支持多选
+const tag = /<input[^>]*id="importFile"[^>]*>/.exec(html);
+assert.ok(tag, 'index.html 缺少 #importFile');
+assert.ok(/\bmultiple\b/.test(tag[0]), 'importFile 必须带 multiple: ' + tag[0]);
+assert.ok(/一次多选/.test(html), '提示文案应告诉用户可以多选');
+
+// 2) 切出 onchange 处理函数（不是整份 app.js：它启动时会摸一堆 DOM）
+const start = src.indexOf("$('importFile').onchange");
+const end = src.indexOf('/* ── 顶部动作');
+assert.ok(start >= 0 && end > start, '找不到 importFile.onchange');
+
+const els = {
+  importFile: { files: [{ name: 'a.json' }, { name: 'b.json' }, { name: 'c.json' }], value: 'picked' },
+  importDone: { hidden: true, textContent: '' },
+  importErr: { hidden: true, textContent: '' },
+};
+const uploads = [];
+let overviewReloaded = 0;
+const ctx = {
+  console,
+  LS_KEY: 'k',
+  localStorage: { getItem: () => 'test-key' },
+  FormData: class { constructor() { this.items = []; } append(k, v) { this.items.push([k, v]); } },
+  fetch: async (url, opt) => {
+    const fd = opt.body;
+    assert.strictEqual(fd.items.length, 1, '每个请求只该带一个 file 字段');
+    const name = fd.items[0][1].name;
+    uploads.push([url, name]);
+    if (name === 'b.json') {
+      return { ok: false, status: 400, json: async () => ({ error: 'invalid json: 顶层是对象但里面没找到账号数组' }) };
+    }
+    return {
+      ok: true, status: 200,
+      json: async () => name === 'c.json'
+        ? { ok: true, imported: 2, skipped: 1, errors: ['missing required fields (id=9)'] }
+        : { ok: true, imported: 2, skipped: 0, errors: [] },
+    };
+  },
+  invalidatePackages: () => {},
+  loadOverview: () => { overviewReloaded++; },
+  $: id => els[id],
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end), ctx);
+assert.strictEqual(typeof els.importFile.onchange, 'function', 'onchange 未挂上');
+
+els.importFile.onchange().then(() => {
+  // 3) 三个文件逐个上传（不是只取 files[0]）
+  assert.deepStrictEqual(uploads.map(u => u[1]), ['a.json', 'b.json', 'c.json'],
+    '应按顺序逐个上传，实际: ' + JSON.stringify(uploads));
+  assert.ok(uploads.every(u => u[0] === '/panel/api/import/cockpit'), '端点应一致');
+
+  // 4) 汇总：a+c 成功各 2 个号 → 4 个号；c 里 1 个号被跳过；b 整个文件失败
+  const done = els.importDone.textContent;
+  assert.ok(els.importDone.hidden === false, '完成提示应显示');
+  assert.ok(/3 个文件/.test(done), '应报文件数: ' + done);
+  assert.ok(/成功 4 个号/.test(done), '应汇总成功账号数: ' + done);
+  assert.ok(/跳过 1 个号/.test(done), '应汇总跳过账号数: ' + done);
+  assert.ok(/1 个文件失败/.test(done), '应报失败文件数: ' + done);
+
+  // 5) 失败文件的原因要露出来（含具体是哪个文件），不能只吞进控制台
+  assert.ok(els.importErr.hidden === false, '失败详情应显示');
+  const err = els.importErr.textContent;
+  assert.ok(/b\.json/.test(err), '错误里应带失败文件名: ' + err);
+  assert.ok(/顶层是对象/.test(err), '错误里应带服务端原因: ' + err);
+  assert.ok(/c\.json/.test(err), '被跳过的账号原因也应带文件名: ' + err);
+
+  // 6) 收尾：清空 input 以便重复导入同一批文件（不清理则选同一文件不触发 onchange）
+  assert.strictEqual(els.importFile.value, '', '导入后应清空 input');
+  assert.strictEqual(overviewReloaded, 1, '整批结束后只刷新一次列表');
+  console.log('import multi-file ui passed');
+}).catch(e => { console.error(e); process.exit(1); });
+`
