@@ -79,8 +79,10 @@ func (p *Pool) pauseLocked(e *entry) {
 }
 
 // resumeLocked 解除暂停选号（幂等）：只清 paused，账号若不在其它惩罚期即恢复可选。
+// 同时清 hold：人工点「恢复选号」就是该号可用的人工确认，待确认标记随之作废。
 func (p *Pool) resumeLocked(e *entry) {
 	e.paused = false
+	e.hold = false
 	p.dirty.Store(true)
 }
 

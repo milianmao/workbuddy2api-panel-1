@@ -381,6 +381,10 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	isNewAccount := p.cfg.Pool.AuthByUID(acct.UID) == nil
 	p.cfg.Pool.Add(a)
 	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
+	// 但**不直接进选号池**：新号的来路与健康度都还没验证（实测有登录后第一个请求就
+	// 返回 403 code=11140 的封号），统一按「新增待确认」暂停选号，等面板上人工
+	// 「恢复选号」再放流量。保号任务（签到/活跃/保活/余额）照常跑。
+	p.cfg.Pool.Hold(acct.UID)
 
 	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
 	// realm 分支：CN 走 DailyCheckin；global 无 CN 签到体系，改为注册激活 + trial 领取
