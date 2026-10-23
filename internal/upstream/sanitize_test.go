@@ -394,11 +394,15 @@ func TestChatStreamWireBodySanitizeDisabled(t *testing.T) {
 func TestDeepSeekHarnessBrandRewritten(t *testing.T) {
 	in := "You are an AI agent powered by DeepSeek Harness.\n\nCheck the exit code."
 	out := sanitizeTextIdentity(in)
-	if strings.Contains(out, "DeepSeek Harness") || !strings.Contains(out, "DeepSeekRuntime") {
-		t.Fatalf("brand word not rewritten: %q", out)
+	// 本仓差异：整句规则（sanitizeIdentityRewrites[0]）先于品牌词规则命中，把整句换成不含
+	// 任何品牌痕迹的官方身份句。上游只做「品牌词去下划线」，实测仍被上游按短 token 拦
+	// （见 sanitize.go 该条注释），故断言本仓行为，而非上游「保留原句 + 换品牌词」的期望。
+	rule := identitySentenceRule(t)
+	if strings.Contains(out, sanitizeIdentityFeatures[0]) {
+		t.Fatalf("原品牌词仍在出站文本中: %q", out)
 	}
-	if !strings.HasPrefix(out, "You are an AI agent powered by DeepSeekRuntime.") {
-		t.Errorf("surrounding text changed: %q", out)
+	if !strings.HasPrefix(out, rule[1]) {
+		t.Errorf("整句未被替换为本仓目标句: %q", out)
 	}
 	if again := sanitizeTextIdentity(out); again != out {
 		t.Errorf("not idempotent: %q -> %q", out, again)
@@ -422,11 +426,18 @@ func TestPrepareBodyRewritesDeepSeekHarness(t *testing.T) {
 		`{"role":"system","content":"You are an AI agent powered by DeepSeek Harness."},` +
 		`{"role":"user","content":"the DeepSeek Harness checkout is here"}]}`)
 	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", "", false)
-	if strings.Contains(string(out), "DeepSeek Harness") {
-		t.Fatalf("brand word survived: %s", out)
+	rule := identitySentenceRule(t)
+	got := string(out)
+	if strings.Contains(got, sanitizeIdentityFeatures[0]) {
+		t.Fatalf("原品牌词仍出站: %s", got)
 	}
-	if strings.Count(string(out), "DeepSeekRuntime") != 2 {
-		t.Errorf("expected both messages rewritten: %s", out)
+	// system：整句被换成本仓目标句（不含任何品牌词）
+	if !strings.Contains(got, rule[1]) {
+		t.Errorf("system 整句未改写: %s", got)
+	}
+	// user：裸品牌词仍由品牌词规则处理（去下划线），且只出现一次
+	if brand := sanitizeIdentityRewrites[1][1]; strings.Count(got, brand) != 1 {
+		t.Errorf("user 品牌词改写次数异常（want 1）: %s", got)
 	}
 }
 
