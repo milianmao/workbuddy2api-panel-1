@@ -1724,30 +1724,49 @@ $('btnAddApiKey').onclick = async () => {
 $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
+/* 导入：一次可选多个文件。逐个 POST（服务端按单文件解析），最后汇总。
+   逐个而不是打包上传，是为了让「一个坏文件」不连累其它文件——挑了几十份导出
+   之后因为其中一份格式不对就整批失败，是最难解释的体验。 */
 $('importFile').onchange = async () => {
-  const file = $('importFile').files[0];
-  if (!file) return;
+  const files = Array.from($('importFile').files || []);
+  if (!files.length) return;
   $('importDone').hidden = true; $('importErr').hidden = true;
-  const fd = new FormData();
-  fd.append('file', file);
   const h = {};
   const k = localStorage.getItem(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
-  try {
-    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+
+  let imported = 0, skipped = 0, failedFile = 0;
+  const notes = [];  // 失败文件 + 被跳过账号的原因，最后一起列出来
+  for (const [i, file] of files.entries()) {
     $('importDone').hidden = false;
-    $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
-    if (d.errors && d.errors.length) {
-      console.warn('import errors:', d.errors);
+    $('importDone').textContent = '正在导入 ' + (i + 1) + ' / ' + files.length + '：' + file.name;
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      imported += d.imported || 0;
+      skipped += d.skipped || 0;
+      if (d.errors && d.errors.length) notes.push(file.name + '：' + d.errors.join('；'));
+    } catch (e) {
+      failedFile++;
+      notes.push(file.name + '：' + e.message);
     }
-    invalidatePackages();
-    loadOverview(true);
-  } catch (e) {
-    $('importErr').hidden = false;
-    $('importErr').textContent = '导入失败：' + e.message;
   }
+
+  $('importDone').textContent = '导入完成：' + files.length + ' 个文件，成功 ' + imported + ' 个号'
+    + (skipped ? '，跳过 ' + skipped + ' 个号' : '')
+    + (failedFile ? '，' + failedFile + ' 个文件失败' : '');
+  if (notes.length) {
+    $('importErr').hidden = false;
+    // .state 是 flex 且不保留换行，多条用「；」串起来。
+    $('importErr').textContent = notes.slice(0, 5).join('；')
+      + (notes.length > 5 ? '；…共 ' + notes.length + ' 条，其余见浏览器控制台' : '');
+    console.warn('import issues:', notes);
+  }
+  invalidatePackages();
+  loadOverview(true);
   $('importFile').value = '';
 };
 
