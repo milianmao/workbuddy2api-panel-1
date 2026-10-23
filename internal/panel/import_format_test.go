@@ -1,9 +1,12 @@
 package panel
 
-// 导入外壳兼容性测试：面板报「导入失败：invalid json: json: cannot unmarshal object
-// into Go value of type []panel.cockpitAccount」时，说明手上的导出文件顶层是对象而
-// 不是数组。解析器现在要能吃下 cockpit tools 各版本的常见外壳，并且在对不上时给出
-// 能照着排查的错误（回显顶层字段名 + 文件开头），而不是一句 Go 类型错误。
+// 导入外壳兼容性测试。
+//
+// 2026-10-23 两轮现场：先是「invalid json: json: cannot unmarshal object into Go value
+// of type []panel.cockpitAccount」（只认顶层数组），修完变成「导入完成但 0 个成功」——
+// 因为用户手上的是**面板/插件 auth 文件**形状（嵌套 {"account":{uid},"auth":{accessToken}}、
+// camelCase），而解析只按 cockpit 的 snake_case 字段读，uid/at/rt 全空被当缺字段跳过。
+// 所以这里既测外壳，也测「auth 文件形状」这条真实来源。
 
 import (
 	"bytes"
@@ -19,7 +22,11 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 )
 
+// cockpit 导出的 snake_case 一行（expires_at 为毫秒）。
 const accJSON = `{"uid":"uid-1","email":"a@b.c","access_token":"at","refresh_token":"rt","expires_at":1893456000000,"domain":"workbuddy.cn"}`
+
+// 面板/插件 auth 文件形状（嵌套 + camelCase，expiresAt 为秒）。
+const authFileJSON = `{"account":{"enterpriseId":"","nickname":"135****9374","uid":"777bd8bc"},"auth":{"accessToken":"eyJat","refreshToken":"eyJrt","expiresAt":1795096802,"domain":"www.codebuddy.cn","realm":"cn"}}`
 
 func TestParseCockpitAccountsShapes(t *testing.T) {
 	cases := []struct {
@@ -37,7 +44,12 @@ func TestParseCockpitAccountsShapes(t *testing.T) {
 		{"单账号对象", accJSON, 1, "uid-1"},
 		{"二次编码成字符串", `"[` + strings.ReplaceAll(accJSON, `"`, `\"`) + `]"`, 1, "uid-1"},
 		{"带 BOM", "\xef\xbb\xbf[" + accJSON + "]", 1, "uid-1"},
-		{"以 uid 为键的字典", `{"k1":` + accJSON + `,"k2":{"uid":"uid-2","access_token":"at2","refresh_token":"rt2"}}`, 2, "uid-1"},
+		// 真实来源：auths/ 目录里的那种文件。
+		{"auth 文件单对象", authFileJSON, 1, "777bd8bc"},
+		{"auth 文件在数组里", `[` + authFileJSON + `]`, 1, "777bd8bc"},
+		{"auth 文件在 accounts 里", `{"accounts":[` + authFileJSON + `]}`, 1, "777bd8bc"},
+		{"扁平 camelCase", `{"uid":"u-2","accessToken":"at","refreshToken":"rt","expiresAt":1795096802}`, 1, "u-2"},
+		{"以 uid 为键的字典", `{"k1":` + accJSON + `,"k2":` + authFileJSON + `}`, 2, "777bd8bc"},
 		{"外壳里是空数组", `{"accounts":[]}`, 0, ""},
 		{"顶层对象但对不上", `{"meta":{"version":1},"exported":true}`, -1, ""},
 		{"不是 JSON", `uid,access_token`, -1, ""},
@@ -57,11 +69,80 @@ func TestParseCockpitAccountsShapes(t *testing.T) {
 			if len(got) != c.want {
 				t.Fatalf("账号数 = %d，期望 %d", len(got), c.want)
 			}
-			if c.want > 0 && got[0].UID != c.uid {
-				t.Fatalf("uid = %q，期望 %q", got[0].UID, c.uid)
+			if c.want > 0 {
+				found := false
+				for _, a := range got {
+					if a.UID == c.uid {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("没解析出 uid=%q", c.uid)
+				}
 			}
 		})
 	}
+}
+
+// auth 文件形状带过来的 realm / 企业 id / 过期时间不能被丢掉：
+// 企业号当个人号跑成长任务会被上游一路 400，过期时间单位错了则会立刻触发 refresh。
+func TestDecodeCockpitAccountKeepsAuthFileFields(t *testing.T) {
+	acc, err := decodeCockpitAccount([]byte(authFileJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acc.AccessToken != "eyJat" || acc.RefreshToken != "eyJrt" {
+		t.Fatalf("token 解析错: %q / %q", acc.AccessToken, acc.RefreshToken)
+	}
+	if acc.Realm != "cn" {
+		t.Fatalf("realm 应保留 cn，得到 %q", acc.Realm)
+	}
+	if acc.expiresAtSec != 1795096802 {
+		t.Fatalf("秒级 expiresAt 不该被当成毫秒再除：%d", acc.expiresAtSec)
+	}
+
+	// cockpit 导出的毫秒 expires_at 必须归一成秒，否则 ExpiresAt 会变成 6 万年后的未来。
+	ck, err := decodeCockpitAccount([]byte(accJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ck.expiresAtSec != 1893456000 {
+		t.Fatalf("毫秒 expires_at 应归一成秒 1893456000，得到 %d", ck.expiresAtSec)
+	}
+}
+
+// 缺字段时必须点名缺的是哪个（面板弹窗就显示这一句），不能再只报「失败」。
+func TestImportSkipReasonNamesMissingField(t *testing.T) {
+	p := New(Config{Version: "test", APIKey: "test-key", Pool: pool.New("")})
+	// 只有 accessToken，没有 refreshToken / uid。
+	body := `[{"access_token":"at","domain":"www.codebuddy.cn"}]`
+	code, out := postImport(t, p, body)
+	if code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200（解析成功但跳过）", code)
+	}
+	if !strings.Contains(out, "缺字段") || !strings.Contains(out, "refreshToken") || !strings.Contains(out, "uid") {
+		t.Fatalf("跳过原因应点名缺 uid/refreshToken: %s", out)
+	}
+}
+
+func postImport(t *testing.T, p *Panel, payload string) (int, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", "cockpit.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/import/cockpit", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	p.importCockpit(rec, req)
+	return rec.Code, rec.Body.String()
 }
 
 func TestParseCockpitAccountErrorIsActionable(t *testing.T) {
@@ -69,7 +150,6 @@ func TestParseCockpitAccountErrorIsActionable(t *testing.T) {
 	if err == nil {
 		t.Fatal("对不上的对象应报错")
 	}
-	// 关键：错误里要有顶层字段名（meta/exported），否则用户看不出是哪层套错了。
 	for _, want := range []string{"meta", "exported", "顶层"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("错误信息应包含 %q，实际: %v", want, err)
@@ -77,30 +157,12 @@ func TestParseCockpitAccountErrorIsActionable(t *testing.T) {
 	}
 }
 
-// 面板层面的回归：这类文件以前返回 400 且文案是 Go 类型错误；现在要么解析成功，
-// 要么返回能照着排查的中文错误。
 func TestImportCockpitHandlerRejectsUnparseableObject(t *testing.T) {
 	p := New(Config{Version: "test", APIKey: "test-key", Pool: pool.New("")})
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
-	fw, err := mw.CreateFormFile("file", "cockpit.json")
-	if err != nil {
-		t.Fatal(err)
+	code, got := postImport(t, p, `{"meta":{"version":1},"exported":true}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("状态码 = %d，期望 400", code)
 	}
-	if _, err := fw.Write([]byte(`{"meta":{"version":1},"exported":true}`)); err != nil {
-		t.Fatal(err)
-	}
-	mw.Close()
-
-	req := httptest.NewRequest(http.MethodPost, "/panel/api/import/cockpit", &body)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	rec := httptest.NewRecorder()
-	p.importCockpit(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("状态码 = %d，期望 400", rec.Code)
-	}
-	got := rec.Body.String()
 	if strings.Contains(got, "cannot unmarshal") {
 		t.Fatalf("不该再回 Go 类型错误: %s", got)
 	}
@@ -110,7 +172,7 @@ func TestImportCockpitHandlerRejectsUnparseableObject(t *testing.T) {
 }
 
 // 导入弹窗一次可选多个文件：input 必须带 multiple，处理函数必须逐个上传并汇总，
-// 单个文件失败不能连累整批（这份脚本在容器里因无 node 会 skip，在有 node 的机器上生效）。
+// 单个文件失败不能连累整批（容器内无 node 会 skip，在有 node 的机器上生效）。
 func TestImportUIAllowsMultipleFiles(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
