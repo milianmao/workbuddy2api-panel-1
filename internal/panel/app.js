@@ -539,7 +539,11 @@ function renderAccounts(list) {
     let cls = '', tag;
     if (s.disabled) { cls = 'off'; tag = '<span class="tag bad">已禁用</span>'; }
     // 暂停选号：与禁用同属「不可选」，但照常保号（吸收上游 fd835df）
-    else if (s.paused) { cls = 'off'; tag = '<span class="tag warn">已暂停选号</span>'; }
+    // hold = 新导入/新登录的号待人工确认（解冻清不掉，只有「恢复选号」才进池）
+    else if (s.paused) {
+      cls = 'off';
+      tag = s.hold ? '<span class="tag warn">新号待确认</span>' : '<span class="tag warn">已暂停选号</span>';
+    }
     else if (cool > 0) {
       cls = 'cool';
       const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
@@ -632,7 +636,7 @@ function renderAccounts(list) {
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>' : ''),
         (frozen ? '<button class="xs ghost" data-a="probe_ban" data-u="' + esc(s.uid) + '" title="只读探测上游是否已解封：不 revive、不参与选号、不改任何状态">探活</button>' : ''),
         (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
-                : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
+                : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '"' + (s.hold ? ' title="新号默认暂停选号：确认可用后点此进选号池"' : '') + '>恢复选号</button>'
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (personal ? '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额' : '退出选号，但照常保活 / 刷新额度') + '">暂停选号</button>')),
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>'),
         '<button class="xs ghost" data-a="remark" data-u="' + esc(s.uid) + '" title="给这个账号起个本机备注（只存浏览器）">备注</button>',
