@@ -37,6 +37,19 @@ func TestImportAccountDefaultsPaused(t *testing.T) {
 	if got := pl.Pick(); got != nil {
 		t.Fatalf("导入的号默认必须暂停选号，实际被选中 uid=%s", got.UID)
 	}
+	// 「待确认」标记（hold）必须落到状态里，供面板渲染「新号待确认」。
+	if st, ok := pl.Status("uid-import-1"); !ok || !st.Hold {
+		t.Fatalf("导入的号应带 hold 待确认标记，实际 %+v ok=%v", st, ok)
+	}
+	// 关键回归：解冻（Revive = 全清）不得清掉导入号的暂停，否则一次「解冻」
+	// 或任何按 Revive 语义实现的自动路径就把未验证的新号推进了转发路径。
+	pl.Revive("uid-import-1")
+	if st, _ := pl.Status("uid-import-1"); !st.Paused || !st.Hold {
+		t.Fatalf("解冻不得清除导入号的待确认暂停，实际 %+v", st)
+	}
+	if got := pl.Pick(); got != nil {
+		t.Fatalf("解冻后仍不得进选号池，实际被选中 uid=%s", got.UID)
+	}
 	// 暂停 ≠ 禁用：号还在池里，保号任务（签到/活跃/保活/余额）照常遍历它。
 	if got := pl.AuthByUID("uid-import-1"); got == nil {
 		t.Fatal("导入后账号应已在池内（暂停只关选号）")

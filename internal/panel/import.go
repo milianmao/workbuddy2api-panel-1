@@ -410,14 +410,18 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 // 都未经验证，故**默认暂停选号**——先把号放进池子（签到 / 活跃 / 保活 / 余额刷新照常
 // 跑起来），但不进转发路径；面板看积分、必要时手工试一次，确认没问题再「恢复选号」。
 //
-// 顺序有讲究：Pool.Revive 是「解冻=全清」语义，会把 paused 一并清掉，所以 Pause 必须
-// 排在 Revive 之后，否则暂停会被静默撤销。抽成独立方法也是为了能脱离上游（签到/余额）
-// 单测这条语义。
+// 顺序有讲究：Pool.Revive 是「解冻=全清」语义，会把 paused 一并清掉，所以 Hold 必须
+// 排在 Revive 之后，否则暂停会被静默撤销。Hold 还额外打「待确认」标记，让暂停能挺过
+// 后续任何一次解冻/保活，直到人工「恢复选号」。抽成独立方法也是为了能脱离上游
+// （签到/余额）单测这条语义。
 func (p *Panel) addImportedAccount(a *auth.Auth) bool {
 	isNew := p.cfg.Pool.AuthByUID(a.UID) == nil
 	p.cfg.Pool.Add(a)
 	p.cfg.Pool.Revive(a.UID)
-	p.cfg.Pool.Pause(a.UID)
+	// 用 Hold 而非 Pause：Pause 只是普通暂停，一次「解冻」（Revive 清 paused）或
+	// 人工解冻就会把号推进选号池；Hold 带「待确认」标记，解冻清不掉，只有面板上
+	// 「恢复选号」（Resume）才解除。
+	p.cfg.Pool.Hold(a.UID)
 	return isNew
 }
 

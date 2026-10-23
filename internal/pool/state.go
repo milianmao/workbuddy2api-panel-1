@@ -109,7 +109,14 @@ func (p *Pool) Revive(uid string) bool {
 		return false
 	}
 	e.disabled = false
-	e.paused = false // 解冻是全清：暂停选号一并解除
+	// 解冻是全清：暂停选号一并解除——但「新增待确认」（hold）的账号例外。
+	// 新号的来路/健康度未经验证（实测有导入即 403 11140 的封号），若一次「解冻」
+	// 就把它们推进选号池，403 会直接打到线上流量上；这类账号必须人工「恢复选号」。
+	if e.hold {
+		e.paused = true
+	} else {
+		e.paused = false
+	}
 	e.until = time.Time{}
 	e.coolKind = 0
 	e.reason = ""
@@ -123,6 +130,25 @@ func (p *Pool) Revive(uid string) bool {
 	// 点完按钮的账号仍被 degradeUntil 挡在池外（frozen = disabled || 降权中）。
 	e.consecutiveFails = 0
 	e.degradeUntil = time.Time{}
+	p.dirty.Store(true)
+	return true
+}
+
+// Hold 新增账号落池后的统一口径：暂停选号 + 打「待确认」标记（entry.hold）。
+// 与 Pause 的区别只在持续时间：hold 不受 Revive（解冻全清）清除，也不受签到/保活
+// 影响，只有 Resume（人工「恢复选号」）才解除。用途是新导入/新登录的号先把保号任务
+// 跑起来（签到、活跃、余额都能看到），但**不进转发路径**，避免来路未验证的号（实测
+// 有 import 即 403 11140 的封号）把错误打到线上。
+// uid 不存在返回 false。
+func (p *Pool) Hold(uid string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	p.pauseLocked(e)
+	e.hold = true
 	p.dirty.Store(true)
 	return true
 }
@@ -142,7 +168,8 @@ func (p *Pool) Pause(uid string) bool {
 	return true
 }
 
-// Resume 解除暂停选号（幂等，对未暂停账号为空操作）。uid 不存在返回 false。
+// Resume 解除暂停选号（幂等，对未暂停账号为空操作）。同时清「新增待确认」标记：
+// 人工恢复选号即视为该号可用已确认。uid 不存在返回 false。
 func (p *Pool) Resume(uid string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -801,6 +828,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Disabled:             e.disabled,
 		DisabledAt:           disabledAtRFC3339(e),
 		Paused:               e.paused,
+		Hold:                 e.hold,
 		SuccessCount:         e.successCount,
 		ErrTotal:             e.errTotal,
 		CheckinDone:          e.lastCheckinDay == cst.Day(now),
