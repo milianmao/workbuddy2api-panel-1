@@ -248,6 +248,8 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .acc.md .mark { display: none; }
 /* 操作列用 width:1px + nowrap 的经典技巧：列宽恰为内容宽，其余列按内容自适应 */
 .acc .c-acts { width: 1px; white-space: nowrap; }
+/* 多选列：只放一个复选框，宽度压到最小；不参与 hover 高亮区分 */
+.acc .pick { width: 1px; min-width: 1px; padding-right: 0; }
 /* 档位标签列：允许换行在标签之间（不拆字），并给足最小宽度 */
 .acc .efs { min-width: 150px; }
 .acc .efs .tag { margin: 1px 0; }
@@ -795,6 +797,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>账号池</h3>
           <span class="grow"></span>
           <span class="note" id="accNote"></span>
+          <span class="note" id="accSelNote"></span>
+          <select id="accSort" class="xs" aria-label="账号排序方式">
+            <option value="default">默认顺序</option>
+            <option value="state">按状态</option>
+            <option value="credits">按积分</option>
+            <option value="success">按成功数</option>
+          </select>
+          <button class="xs" id="btnPauseSel" title="对勾选的账号暂停选号（签到 / 保活照常）">暂停所选</button>
+          <button class="xs" id="btnResumeSel" title="对勾选的账号恢复选号">恢复所选</button>
           <button class="xs" id="btnRemarks">备注</button>
           <button class="xs" id="btnCheckinAll">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
@@ -805,6 +816,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <table class="acc">
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
+            <th class="pick"><input type="checkbox" id="accPickAll" title="全选 / 全不选（批量暂停·恢复选号用）" aria-label="全选账号"></th>
             <th>账号</th><th>状态</th><th>积分</th>
             <th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
           </tr></thead>

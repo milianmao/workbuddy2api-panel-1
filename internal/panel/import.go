@@ -127,9 +127,7 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		isNewAccount := p.cfg.Pool.AuthByUID(uid) == nil
-		p.cfg.Pool.Add(a)
-		p.cfg.Pool.Revive(uid)
+		isNewAccount := p.addImportedAccount(a)
 
 		// 顺带签到/激活（幂等；失败仅记日志，不阻断导入）。
 		if realm == "global" {
@@ -167,6 +165,23 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		"skipped":  skipped,
 		"errors":   errs,
 	})
+}
+
+// addImportedAccount 把一份导入的凭证放进池子，返回它是否为新号。
+//
+// 与浏览器登录的分工不同：登录是一个号一个号人工确认，导入是批量灌凭证，来路/健康度
+// 都未经验证，故**默认暂停选号**——先把号放进池子（签到 / 活跃 / 保活 / 余额刷新照常
+// 跑起来），但不进转发路径；面板看积分、必要时手工试一次，确认没问题再「恢复选号」。
+//
+// 顺序有讲究：Pool.Revive 是「解冻=全清」语义，会把 paused 一并清掉，所以 Pause 必须
+// 排在 Revive 之后，否则暂停会被静默撤销。抽成独立方法也是为了能脱离上游（签到/余额）
+// 单测这条语义。
+func (p *Panel) addImportedAccount(a *auth.Auth) bool {
+	isNew := p.cfg.Pool.AuthByUID(a.UID) == nil
+	p.cfg.Pool.Add(a)
+	p.cfg.Pool.Revive(a.UID)
+	p.cfg.Pool.Pause(a.UID)
+	return isNew
 }
 
 // validImportUID 校验导入 uid 是否可用于拼文件名（同 login.go validUID 口径）。
