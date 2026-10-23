@@ -160,7 +160,6 @@ var sanitizeIdentityRewrites = [][2]string{
 	{
 		// 本仓补丁：整句规则与品牌词同属 identity 作用域（sanitize_brand_scope 生效），
 		// 且须排在品牌词规则之前 —— 品牌词先被替换后整句就再也匹配不到了。
-	{
 		// DeepSeek Harness 在 system 首句注入的固定身份声明
 		// （"You are an AI agent powered by DeepSeek Harness."）。上游按该句识别
 		// 非官方渠道并回 400 code=11-128（issue #1 / 社区 PR #2）。
@@ -176,6 +175,7 @@ var sanitizeIdentityRewrites = [][2]string{
 		"You are an AI agent powered by DeepSeek Harness",
 		"You are CodeBuddy Code",
 	},
+	{
 		// DSH 的身份句（@deepseek-ai/dsh-system-prompt 注入的 harness:identity 段）被上游
 		// 当成「非官方渠道调用」整单拦截：400 11-128 Illegal API invocation from an
 		// unapproved channel。实测换一词即绕过（与插 U+200B 等效，但可见、可 diff）。
