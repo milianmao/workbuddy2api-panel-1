@@ -6,7 +6,7 @@ package panel
 //	   「恢复选号」后立即可选，重复导入同一 uid 也回到暂停态。
 //	2. 面板账号池的「按状态排序 + 多选批量暂停/恢复选号」：
 //	   index.html 控件齐全、表头与数据行列数一致、勾选态能跨重绘保持、
-//	   状态排序顺序为 禁用 → 暂停 → 冷却 → 可用。
+//	   状态排序顺序为 可用 → 保留积分 → 冷却 → 疑似登录失效 → 暂停 → 禁用。
 
 import (
 	"os"
@@ -97,6 +97,7 @@ const ctx = {
   esc: s => String(s == null ? '' : s), dur: () => '1m', ago: () => '刚刚',
   remarkName: (uid, html2) => html2,
   rateLimitRowsHtml: () => '', formatTokenCount: () => '0', formatLatency: () => '-', formatRate: () => '-',
+  disabledKind: () => null, disabledAge: () => '',
 };
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) +
@@ -127,17 +128,19 @@ ctx.pick('a');
 ctx.renderAccounts([{ uid: 'a', credits: 1 }, { uid: 'b', credits: 2 }]);
 assert.ok(/class="pk" data-u="a" checked/.test(tb.innerHTML), '已勾选的号重绘后应保持勾选');
 
-// 5) 状态排序：禁用 → 暂停 → 冷却 → 可用；同档按积分降序。
+// 5) 状态排序：可用 → 保留积分 → 冷却 → 疑似失效 → 暂停 → 禁用；同档按积分降序。
 ctx.setSort('state');
 ctx.renderAccounts([
   { uid: 'okc', credits: 50 },
   { uid: 'disabled', disabled: true, credits: 10 },
   { uid: 'paused', paused: true, credits: 20 },
   { uid: 'cooling', cool_remaining_sec: 120, credits: 30 },
+  { uid: 'reserved', reserve_blocked: true, credits: 40 },
+  { uid: 'dead', session_dead_fails: 1, credits: 35 },
 ]);
 const order = [...tb.innerHTML.matchAll(/class="pk" data-u="([A-Za-z0-9_-]+)"/g)].map(m => m[1]);
-assert.deepStrictEqual(order, ['disabled', 'paused', 'cooling', 'okc'],
-  '状态排序应为 禁用→暂停→冷却→可用，得到 ' + order.join(','));
+assert.deepStrictEqual(order, ['okc', 'reserved', 'cooling', 'dead', 'paused', 'disabled'],
+  '状态排序应为 可用→保留积分→冷却→疑似失效→暂停→禁用，得到 ' + order.join(','));
 
 console.log('accounts batch ui passed');`
 	path := filepath.Join(t.TempDir(), "accbatch.cjs")
