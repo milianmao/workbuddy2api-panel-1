@@ -30,12 +30,19 @@ backups/
 LOOP.md
 PLAN.md
 SPEC.md
-docs/
+# 注意：用 docs/* 而非 docs/。忽略目录本身会让 Git 不再向下遍历，
+# 下面针对 docs/project-note 的反向规则就永远不生效。
+docs/*
+!docs/project-note/
 
 # 设计/计划文档（但 README.md 必须进版本库）
 *.md
 !README.md
 !AGENTS.md
+
+# 项目知识库（knowledge-base-builder 产出，下游 Skill 直接按路径读取）：
+# 必须显式反忽略——上面的 *.md 会连 docs/project-note/*.md 一起吞掉。
+!docs/project-note/**/*.md
 
 # Windows binaries
 /wb2api.exe
