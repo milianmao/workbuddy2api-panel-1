@@ -656,18 +656,19 @@ let accSel = new Set();   // 已勾选的 uid
 let accSort = 'default';  // default | state | credits | success
 let accLast = [];         // 最近一次渲染用的（已排序）账号数组
 
-/* accStateRank 状态优先级，数字越小越靠前：禁用 > 暂停选号 > 冷却/限流 > 保留积分 >
-   疑似登录失效 > 可用。口径与行内徽标判定同序，避免「排序结果与徽标看起来不一致」。 */
+/* accStateRank 状态优先级，数字越小越靠前：可用 > 保留积分 > 冷却/限流 >
+   疑似登录失效 > 暂停选号 > 禁用。按「离可用多远」排，可用号排最前，一眼先看到能接单的；
+   判定链与行内徽标同序（谁命中谁显示不变），但方向相反：徽标挑最重的标签，排序挑最可用的号。 */
 function accStateRank(s) {
-  if (s.disabled) return 0;
-  if (s.paused) return 1;
+  if (s.disabled) return 5;
+  if (s.paused) return 4;
   const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
   const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
   const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
   if (cool > 0) return 2;
-  if (s.reserve_blocked) return 3;
-  if (s.session_dead_fails > 0) return 4;
-  return 5;
+  if (s.reserve_blocked) return 1;
+  if (s.session_dead_fails > 0) return 3;
+  return 0;
 }
 
 /* sortAccounts 返回排好序的副本（不改入参）：状态序同档内按积分降序，便于一眼挑「能用的」。
