@@ -843,7 +843,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
             <th class="pick"><input type="checkbox" id="accPickAll" title="全选 / 全不选（批量暂停·恢复选号用）" aria-label="全选账号"></th>
-            <th>账号</th><th>状态</th><th>代理</th><th>积分</th>
+            <th>账号</th><th>状态</th><th>代理</th><th>积分</th><th title="今日实测扣费：上游 usage 回执里的 credit 累加（仅统计拿到回执的请求）；「—」= 无法统计（未装配用量记录器，或今天有请求但没拿到扣费回执）">今日已用</th>
             <th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>

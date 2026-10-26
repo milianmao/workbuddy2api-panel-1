@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -217,7 +218,10 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 		// 上游没给 total：用 pt+ct 兜底，保证总量口径连续。
 		b.TT += d.PromptTokens + d.CompletionTokens
 	}
-	if d.HasCredit {
+	// 非有限值（NaN/±Inf）直接丢弃：它一旦落进 CR 就会跟着桶一起落盘，之后每次
+	// json.Marshal 都失败——panel.writeJSON 不看这个错误，于是 overview/usage 会
+	// 返回 200 加空 body（面板每 5 秒轮询，整页数字全灭），坏的不只是这一个数字。
+	if d.HasCredit && !math.IsNaN(d.Credit) && !math.IsInf(d.Credit, 0) {
 		b.CR += d.Credit
 		b.CRN++
 		// 比例只使用同一次请求同时具备 credit 与 token 的样本，避免把
@@ -574,6 +578,115 @@ func bucketTime(scope string) (time.Time, bool) {
 	}
 	ts, err := time.ParseInLocation(dayLayout, strings.TrimPrefix(scope, "d:"), time.Local)
 	return ts, err == nil
+}
+
+// DayCredits 一个账号「今天」在本网关的实测扣费。
+// Observed=false 表示当天有请求但一次 credit 回执都没拿到 —— 花费未知，
+// 与「确实没花钱」（Observed=true, Credits=0）必须区分，否则面板会把
+// "没测到"显示成"没花钱"（见包注释与 Add 里 CRN 的语义）。
+type DayCredits struct {
+	Credits  float64
+	Observed bool
+}
+
+// TodayCreditsByUID 返回本地自然日内各账号的实测扣费（uid → DayCredits）。
+//
+// 固定按「本地日历日」而不是滚动窗口：面板概况每 5 秒轮询一次，用户看的就是
+// 「今天花了多少」。小时桶与已折叠的日桶都按桶起点落在哪一天计入。
+//
+// 三种状态必须分开，调用方（面板）据此决定显示数字还是「—」：
+//   - uid 不在结果里 → 今天没有桶，本网关确实没为它花额度；
+//   - 在结果里且 Observed → 至少一个桶拿到过 credit 回执，Credits 可信
+//     （可以为 0：免费/限免模型的回执就是 0 分）；
+//   - 在结果里但 !Observed → 今天有请求却一份回执都没拿到，**花费未知**，
+//     调用方必须省略该值而不是落成 0。这正是 CRN 计数器的存在意义：Add 对
+//     每次尝试都建桶（只有 CR/CRN 受 HasCredit 约束），所以"有桶"从来不等于
+//     "观测到扣费"。
+//
+// 日界是**宿主/服务器本地日**，不是浏览器本地日：写入侧 Add 直接用调用方传入的
+// now.Format 打 scope，生产调用方传 time.Now()（宿主本地时区）；读取侧这里把
+// now 归一到 time.Local。所以 TZ=Asia/Shanghai 的服务器遇到 UTC 浏览器时，面板
+// 「今日已用」与用量页（浏览器本地日）会差一个时区偏移。这是刻意保留的：服务器
+// 只认自己的本地日，取一边口径比两边都不准强。
+//
+// 实现刻意不走 SnapshotWindow 的「先拷桶、锁外聚合」：那边要聚合多个维度、由用户
+// 主动触发，拷一份值得；这里只是一次求和，却跑在每个打开的面板每 5 秒一次的
+// overview 上，40 万桶全拷一遍 ≈ 77 MB 临时分配，纯属自找的 GC 压力。所以改成
+// 锁内单次只读遍历，判日靠 scope 字符串比较（见 scopeOnDay），不解析时间。
+//
+// 也不加"dayTotals 增量索引"：实测 40k 桶全扫 ≈ 8 ms，对着 5 秒一次的轮询有两个
+// 数量级余量，maxBuckets=400000 只是病态上限、真实账号池远低于此。增量索引等于
+// 给"钱"的数字造第二份真相（写入/折叠/加载/并发四处都得同步维护），漏一处就是
+// 账错——宁可每次线性扫。
+func (r *Recorder) TodayCreditsByUID(now time.Time) map[string]DayCredits {
+	if r == nil {
+		return nil
+	}
+	day := now.In(time.Local).Format(dayLayout)
+
+	r.mu.Lock()
+	// defer 而不是手工 Unlock：本函数在 chat 热路径的轮询上，循环里一旦 panic
+	// 就会把整个记录器的锁永久留在占用态，之后每个请求都卡死（Add/Rollup/flush
+	// 全是 defer，只有这里曾是裸 Unlock）。
+	defer r.mu.Unlock()
+
+	var out map[string]DayCredits // 惰性创建：今天无桶时连一个 map 都不分配
+	for _, b := range r.buckets {
+		if !scopeOnDay(b.Scope, day) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]DayCredits)
+		}
+		dc := out[b.UID]
+		dc.Credits += b.CR
+		if b.CRN > 0 {
+			dc.Observed = true
+		}
+		out[b.UID] = dc
+	}
+
+	if out == nil {
+		return nil
+	}
+	return out
+}
+
+// scopeOnDay 判断桶 scope 是否落在本地日历日 day（"2006-01-02"）上。
+//
+// 为什么直接比字符串而不解析：scope 本身就是「h:/d: + 定宽本地日期」。解析成
+// time.Time 只为取 Y/M/D 并不分配（ParseInLocation 实测 0 allocs），真正的代价
+// 是 CPU——40k 桶的一次扫描里解析 37.2 ms、字节比较 13.4 ms，约 2.8 倍；本函数
+// 每次都跑在 overview 轮询路径上，这个差值直接落在面板刷新上。长度、前缀、'T'
+// 分隔符逐项校验才是安全的——只做 HasPrefix 的话 "h:2026-10-260"（日期段多一位）
+// 也会被当成今天。
+//
+// 前提：hourLayout/dayLayout 的日期段定宽且位置固定（"2006-01-02" 恒 10 字符、
+// 小时段恒 2 位）。改 scope 格式必须同步改这里，否则判日会静默错位。
+func scopeOnDay(scope, day string) bool {
+	n := len(day)
+	if len(scope) < n+2 || scope[1] != ':' {
+		return false
+	}
+	switch scope[0] {
+	case 'd':
+		return len(scope) == n+2 && scope[2:] == day
+	case 'h':
+		if len(scope) != n+5 || scope[n+2] != 'T' || scope[2:n+2] != day {
+			return false
+		}
+		return validHourText(scope[n+3], scope[n+4])
+	}
+	return false
+}
+
+// validHourText 两位小时是否在 00-23：ParseInLocation 会拒掉 "25" 这类脏小时，
+// 这里保持同一口径（脏 scope 不进任何日历日）。
+func validHourText(hi, lo byte) bool {
+	if hi < '0' || hi > '9' || lo < '0' || lo > '9' {
+		return false
+	}
+	return (hi-'0')*10+(lo-'0') <= 23
 }
 
 // Snapshot 聚合**所选窗口内**的桶，产出面板一次拉取的全部用量视图数据。

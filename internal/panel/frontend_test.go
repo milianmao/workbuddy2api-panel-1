@@ -2252,3 +2252,141 @@ func TestAppJSAllCalledFunctionsDefined(t *testing.T) {
 		}
 	}
 }
+
+// TestAppJSAccountRowTodayCredits 账号池「今日已用」列必须与表头同序、同数量，且
+// 表头 / 行内两处 tooltip 讲同一套「—」口径。
+//
+// 为什么需要：这一列是「积分」之后的第 7 格，数据来自 overview 的
+// credits_used_today（可选字段）。字段缺席时必须渲染「—」——把「没观测」显示成 0
+// 会让运维误判该号今天没花钱，进而错配流量。列错位则是整表语义漂移（issue #32 复现过）。
+// 另外两处 tooltip 曾各自漂移（表头说「记录器不可用」、行内说「没装记录器时无此字段」），
+// 都把「—」窄化成记录器缺失，漏掉「今天有请求但零扣费回执」——所以这里对两处文案做对拍。
+func TestAppJSAccountRowTodayCredits(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; account row today-credits test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const html = fs.readFileSync(process.argv[3], 'utf8');
+
+// 1) 表头：紧跟在「积分」之后，且带实测口径的 tooltip。
+const bodyIdx = html.indexOf('id="accBody"');
+assert.ok(bodyIdx > 0, 'index.html 缺少 accBody');
+const headStart = html.lastIndexOf('<thead>', bodyIdx);
+const headEnd = html.indexOf('</thead>', headStart);
+const head = html.slice(headStart, headEnd);
+const thCount = (head.match(/<th[\s>]/g) || []).length;
+assert.strictEqual(thCount, 12, '账号表应有 12 列（新增今日已用），得到 ' + thCount);
+// 表头 tooltip 抓成变量：它和行内 title 必须是同一套口径，下面拿真实渲染出来的行做对拍。
+// 只断言「紧跟在积分之后」不够——两处文案各自漂移过一次（一处说「记录器不可用」、
+// 一处说「没装记录器时无此字段」），两种说法都没覆盖「有流量但零回执」这种情形。
+const headTh = /<th\s+title="([^"]*)"\s*>今日已用<\/th>/.exec(head);
+assert.ok(headTh, '「今日已用」表头应带 tooltip: ' + head.replace(/\s+/g, ''));
+assert.ok(/<th>积分<\/th>\s*$/.test(head.slice(0, headTh.index)),
+  '「今日已用」必须紧跟「积分」: ' + head.replace(/\s+/g, ''));
+const headTitle = headTh[1];
+
+// 2) 行渲染：列数对齐，且「今日已用」落在「积分」之后那一格。
+const start = src.indexOf('function renderAccounts('), end = src.indexOf('async function loadOverview(');
+assert.ok(start >= 0 && end > start, 'renderAccounts not found');
+const helperSrc = src.slice(src.indexOf('function trimFixed'), src.indexOf('function fmtCreditRatio'));
+assert.ok(helperSrc.includes('function fmtCredit'), 'fmtCredit not found');
+const tb = { innerHTML: '' };
+const ctx = {
+  String, Number, Math, Date, Object, Array, JSON, RegExp, console,
+  $: id => (id === 'accBody' ? tb : null),
+  esc: s => String(s == null ? '' : s), dur: () => '1m', ago: () => '刚刚',
+  remarkName: (uid, html2) => html2,
+  rateLimitRowsHtml: () => '', formatTokenCount: () => '0', formatLatency: () => '-', formatRate: () => '-',
+  // 切片里还带着 renderModelLocks：它要 fmtLocalDateTime（切片外定义）。本测试不渲染
+  // 模型锁，但一旦以后有人顺手用了，缺这个注入就是 ReferenceError 而非测试失败。
+  fmtLocalDateTime: x => String(x),
+  disabledKind: () => null, disabledAge: () => '',
+  // renderAccounts 走上游的 setHTML 增量重绘：该 helper 在切片之外，给等效实现。
+  setHTML: (el, html) => { el.innerHTML = html; },
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + helperSrc + '\nthis.renderAccounts = renderAccounts;', ctx);
+
+// 格子切分：只数数据行的 <td>（不含空态那一行）。
+const cells = row => (row.match(/<td[\s>][\s\S]*?<\/td>/g) || []);
+// 「今日已用」格是第 7 格（index 6）。每个用例都必须收敛到这一格上再比：整行里
+// 成功/失败、在途、用量格都可能渲染出「>0<」，拿整行 includes 断言等于没断言——
+// 缺席时本该显示「—」的列渲染成 0 也照样过（review 实测：缺席行里「>0<」出现 5 次）。
+const todayCells = s => {
+  ctx.renderAccounts([Object.assign({ uid: 'x', credits: 1, credits_total: 1 }, s)]);
+  const cs = cells(tb.innerHTML);
+  assert.strictEqual(cs.length, thCount, '数据行格数应与表头一致：thead ' + thCount + ' vs 行 ' + cs.length);
+  assert.ok(cs[5].includes('class="cred"'), '第 6 格应为积分列: ' + cs[5]);
+  assert.ok(cs[6].includes('今日实测扣费'), '第 7 格应为今日已用: ' + cs[6]);
+  return cs[6];
+};
+// 拆出 <td …>值</td> 里的值，顺带校验格结构没被改坏（多标签就会在这里炸）。
+const cellParts = cell => {
+  const m = /^<td class="num" title="([^"]*)">([^<]*)<\/td>$/.exec(cell);
+  assert.ok(m, '今日已用格结构应为 <td class="num" title="…">值</td>: ' + cell);
+  return { title: m[1], value: m[2] };
+};
+
+// 2) 列位置：第 7 格，紧跟积分列。
+let parts = cellParts(todayCells({ credits_used_today: 1.25 }));
+assert.strictEqual(parts.value, '1.25', '1.25 应原样展示: ' + parts.value);
+const cellTitle = parts.title;
+
+// 3) 数值格式：≤2 位小数、去尾零；0 显示 0（真实的「今天没花钱」）。
+for (const [raw, want] of [[2, '2'], [12.5, '12.5'], [0, '0'], [1.239, '1.24'], [1.2, '1.2']]) {
+  parts = cellParts(todayCells({ credits_used_today: raw }));
+  assert.strictEqual(parts.value, want, 'credits_used_today=' + raw + ' 应渲染 ' + want + '，得到 ' + parts.value);
+}
+
+// 4) 字段缺席 → 破折号，不是 0。两种成因（记录器没装 / 今天零回执）后端都只表现为
+//    字段缺席，前端无从区分，统一「—」= 无法统计。
+parts = cellParts(todayCells({}));
+assert.strictEqual(parts.value, '—', '缺 credits_used_today 应显示 —，得到 ' + parts.value);
+assert.strictEqual(parts.title, cellTitle, '所有行的 tooltip 应一致（同一个模板字符串）');
+
+// 5) tooltip 口径：表头与行内必须说同一件事。两处文案漂移过一次（表头写「记录器不可用」、
+//    行内写「没装记录器时无此字段」），两种说法都把「—」的成因窄化成了记录器，漏掉
+//    「有流量但零回执」。所以断言的是「— = 无法统计（…）」括号里两种成因都在，
+//    且不出现旧的窄化说法——表头可以是短一点的变体，但不许少讲成因。
+const dashClaim = t => {
+  const m = /「—」\s*=\s*无法统计（([^）]*)）/.exec(t);
+  assert.ok(m, 'tooltip 必须用「—」= 无法统计（…）解释破折号: ' + t);
+  return m[1];
+};
+const headDash = dashClaim(headTitle), cellDash = dashClaim(cellTitle);
+for (const [where, dash] of [['表头', headDash], ['行内', cellDash]]) {
+  assert.ok(dash.includes('记录器'), where + ' tooltip 的「—」解释漏了「未装配用量记录器」这一成因: ' + dash);
+  assert.ok(dash.includes('回执'), where + ' tooltip 的「—」解释漏了「有请求但没拿到扣费回执」这一成因: ' + dash);
+}
+for (const [where, tip] of [['表头', headTitle], ['行内', cellTitle]]) {
+  assert.ok(tip.includes('回执'), where + ' tooltip 应说明数值来自上游 usage 回执: ' + tip);
+  for (const stale of ['记录器不可用', '没装记录器时', '无此字段']) {
+    assert.ok(!tip.includes(stale), where + ' tooltip 仍在使用旧的窄化说法「' + stale + '」: ' + tip);
+  }
+}
+
+// 6) 空态 colspan 与表头列数一致（表头 12 / 数据行 12 / 空态 12）。
+ctx.renderAccounts([]);
+const col = /colspan="(\d+)"/.exec(tb.innerHTML);
+assert.ok(col && Number(col[1]) === thCount, '空态 colspan 应为 ' + thCount + '，得到 ' + (col && col[1]));
+console.log('account row today-credits passed');`
+	f, err := os.CreateTemp(t.TempDir(), "acctoday-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js", "index.html").CombinedOutput()
+	if err != nil {
+		t.Fatalf("account row today-credits test failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "account row today-credits passed") {
+		t.Fatalf("account row today-credits test 未通过:\n%s", out)
+	}
+}

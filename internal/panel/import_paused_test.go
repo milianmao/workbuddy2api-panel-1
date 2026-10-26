@@ -101,9 +101,16 @@ const ctx = {
   // 上游 4662949 起 renderAccounts 改用 setHTML（内容相同不碰 DOM）做增量重绘，
   // 该 helper 定义在切片之外，这里必须给等效实现——直接写 innerHTML 即可。
   setHTML: (el, html) => { el.innerHTML = html; },
+  // 切片里还带着 renderModelLocks，它调切片外的 fmtLocalDateTime；不注入的话，
+  // 以后谁在这里渲染模型锁就是 ReferenceError，而不是一条能读懂的单测失败。
+  fmtLocalDateTime: x => String(x),
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) +
+// 「今日已用」列用 fmtCredit 格式化（renderAccounts 切片外）：把真实实现一并求值，
+// 避免在测试里复制一份格式化逻辑、把格式化回归测成通过。
+const helperSrc = src.slice(src.indexOf('function trimFixed'), src.indexOf('function fmtCreditRatio'));
+assert.ok(helperSrc.includes('function fmtCredit'), 'fmtCredit not found');
+vm.runInContext(src.slice(start, end) + helperSrc +
   '\nthis.renderAccounts = renderAccounts; this.sortAccounts = sortAccounts;' +
   '\nthis.setSort = v => { accSort = v; }; this.pick = u => accSel.add(u);', ctx);
 
