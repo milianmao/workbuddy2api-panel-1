@@ -78,3 +78,72 @@ func (g *wafIPGate) active() bool {
 	defer g.mu.Unlock()
 	return time.Now().Before(g.until)
 }
+
+// ---------------------------------------------------------------------------
+// 按出口分组
+// ---------------------------------------------------------------------------
+
+// 多出口后的分组语义（架构定案）：账号可绑定不同代理节点（= 不同出口 IP），
+// IP 级拦截判定必须按出口分组——直连组（exitKey ""）与每个代理节点各自独立，
+// 一个代理被拦**不能**误停其他出口的轮转；共用同一代理的账号仍在同一组内互相
+// 连坐（这正是「同 IP」语义）。exitKey = 账号绑定的 proxy_id；server 不感知节点
+// 本体，由 main 注入 ExitTagOf(uid) 闭包（nil = 全部归直连组，即旧行为）。
+
+// exitTagOfUID 账号出口标识（ExitTagOf 未注入时恒 "" = 直连组）。
+func (h *Handler) exitTagOfUID(uid string) string {
+	if h.cfg.ExitTagOf == nil {
+		return ""
+	}
+	return h.cfg.ExitTagOf(uid)
+}
+
+// wafGateForExit 返回某出口的 gate 实例（按需创建；实例数 ≤ 1+代理节点数，有界）。
+func (h *Handler) wafGateForExit(exitKey string) *wafIPGate {
+	h.wafMu.Lock()
+	defer h.wafMu.Unlock()
+	if h.wafIPGates == nil {
+		h.wafIPGates = map[string]*wafIPGate{}
+	}
+	g, ok := h.wafIPGates[exitKey]
+	if !ok {
+		g = &wafIPGate{}
+		h.wafIPGates[exitKey] = g
+	}
+	return g
+}
+
+// wafGateForUID 按账号解析出口并返回其 gate（未注入 ExitTagOf 时归直连组）。
+func (h *Handler) wafGateForUID(uid string) *wafIPGate {
+	_, g := h.wafGateOfUID(uid)
+	return g
+}
+
+// wafGateOfUID 一次解析账号出口，返回 (exitKey, 该出口的 gate)。
+// 轮转循环同时需要 exitKey（末端文案）与 gate（喂状态机），分开调用等于把
+// ExitTagOf 闭包解析两遍（它可能要读节点表/持锁），故合并为单次解析。
+func (h *Handler) wafGateOfUID(uid string) (string, *wafIPGate) {
+	exit := h.exitTagOfUID(uid)
+	return exit, h.wafGateForExit(exit)
+}
+
+// wafGateActive 报告某出口是否处于激活态。纯查询语义：不为未出现过的出口
+// 新建 gate（末端文案判定不该扩张分组表）。
+func (h *Handler) wafGateActive(exitKey string) bool {
+	h.wafMu.Lock()
+	g, ok := h.wafIPGates[exitKey]
+	h.wafMu.Unlock()
+	return ok && g.active()
+}
+
+// wafAnyActive 报告任一出口组处于 IP 级拦截激活态（/metrics 的 waf_ip_blocked
+// 观测口径：全局视角）。
+func (h *Handler) wafAnyActive() bool {
+	h.wafMu.Lock()
+	defer h.wafMu.Unlock()
+	for _, g := range h.wafIPGates {
+		if g.active() {
+			return true
+		}
+	}
+	return false
+}

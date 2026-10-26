@@ -1,9 +1,13 @@
 package main
 
 import (
+	"time"
+
 	"github.com/misakano7545/workbuddy2api-panel/internal/alert"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
+	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/server"
+	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
 // realmAwareAvailableForModel 构造会话粘性路由按模型可用口径的 realm 感知闭包。
@@ -38,3 +42,23 @@ func (s alertSource) Health(realm string) alert.Health {
 }
 
 func (s alertSource) WAFActive() bool { return s.h.WAFActive() }
+
+// proxyExitKeyOf 构造「账号 → 实际出口标识」闭包（WAF IP 级拦截的分组键）。
+//
+// 为什么不能直接用 pool.AccountProxy（绑定意图）：TransportFor 在「节点不存在 /
+// 已停用 / 解析失败」三种情况下都回落直连，这些账号的实际出口就是网关本机 IP。
+// 若按绑定意图分组，它们会各自独立成组，而直连组只剩未绑定账号——WAF 的「短窗
+// 多号同 IP」判定被稀释，真正的 IP 级拦截迟迟不触发。proxypoolSvc.ExitKey 与
+// TransportFor 同一口径（空 = 直连），故这里只需一次查询。
+func proxyExitKeyOf(p *pool.Pool, pp *proxypool.Pool) func(uid string) string {
+	return func(uid string) string {
+		if p == nil || pp == nil {
+			return ""
+		}
+		return pp.ExitKey(p.AccountProxy(uid))
+	}
+}
+
+// upstreamDialTimeout 暴露 upstream 的建连上限常量供装配期等值断言（口径单一
+// 事实来源：proxypool.DefaultNodeDialTimeout 必须与它一致）。
+func upstreamDialTimeout() time.Duration { return upstream.DialTimeout }

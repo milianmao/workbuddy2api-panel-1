@@ -244,6 +244,10 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .acc .mark i { display: block; width: 3px; height: 100%; min-height: 36px; background: var(--ok); }
 .acc tbody tr.cool .mark i { background: var(--warn); }
 .acc tbody tr.off .mark i { background: var(--bad); }
+/* 节点表的 tr.off 没有 td.mark 色条（那是账号表专属），补等价视觉：停用节点整行
+   文字转灰，状态标签与操作按钮保持原色，避免「停用」行看不出区别。 */
+#proxyBody tr.off td:not(.acts) { color: var(--ink-3); }
+#proxyBody tr.off .nm { color: var(--ink-2); }
 /* 模型表无色条（健康指示只属于账号表）。 */
 .acc.md .mark { display: none; }
 /* 操作列用 width:1px + nowrap 的经典技巧：列宽恰为内容宽，其余列按内容自适应 */
@@ -334,11 +338,15 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
    导致 vertical-align:middle 失效（按钮整体偏上、行线不齐）。这里强制恢复
    table-cell，让该列和其他列一样参与行高与垂直居中；按钮排列交给内层 .acts-inner。 */
 td.acts { display: table-cell; vertical-align: middle; text-align: right; }
-/* 账号池操作列：每个动作占固定槽位（签到 / 余额 / 任务 / 探活 / 选号 / 禁用 / 备注 / 移除），
+/* 账号池操作列：每个动作占固定槽位（签到 / 余额 / 任务 / 代理 / 探活 / 选号 / 禁用 / 备注 / 移除），
    缺哪个留空槽。否则「解冻 / 暂停选号 / 恢复选号」互斥会改变按钮个数，整列左右错位。
    分列放在内层 div：td 保持 table-cell，vertical-align:middle 才继续生效
    （直接给 td 设 display:grid 会退出表格布局，按钮变顶对齐）。 */
-.acts-inner { display: grid; grid-template-columns: repeat(4, 54px) 68px repeat(3, 54px); gap: 5px; justify-content: end; align-items: center; }
+.acts-inner { display: grid; grid-template-columns: repeat(5, 54px) 68px repeat(3, 54px); gap: 5px; justify-content: end; align-items: center; }
+/* 槽位定宽只对账号表成立（9 个动作互斥占位，缺位留空槽）。订阅表 2 个按钮、节点表
+   3 个按钮若也套 9 轨模板，会白占 320~380px 把表格撑出横向滚动条。.auto 改成
+   「按实际按钮数自动成列、每列等宽」——按钮依旧右对齐、等高、逐行对齐。 */
+.acts-inner.auto { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: 54px; }
 /* 统一盒模型：primary 与 ghost 的边框/行高不同会让「解冻」行比「暂停选号」行高 2~3px，
    行线因此参差。固定高度 + border-box 后每行等高、按钮底边对齐。 */
 .acts-inner button { width: 100%; height: 26px; box-sizing: border-box; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
@@ -703,6 +711,20 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     color: var(--ink-2); font-size: 12.5px; }
   .rm-row input { flex: 1; }
 
+  /* ── 代理池 ────────────────────────────────────────────────────────
+     proxy-tag 照 realm-tag 的形制（账号行内小标签）；绑定节点失效时换警示色。
+     pb-* 为绑定弹窗里的节点单选列表。 */
+  .proxy-tag { display:inline-block; margin-left:6px; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:1px; padding:1px 5px; border-radius:4px; font:500 10px/1 var(--sans); color:var(--ok); background:var(--ok-soft); border:1px solid color-mix(in srgb, var(--ok) 22%, transparent); }
+  .proxy-tag.bad { color:var(--bad); background:var(--bad-soft); border-color:color-mix(in srgb, var(--bad) 22%, transparent); }
+  .proxy-direct { color:var(--ink-3); font-size:11.5px; }
+  .proxy-url { display:inline-block; max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; font-family:var(--mono); font-size:12px; }
+  .pb-list { display:flex; flex-direction:column; gap:6px; }
+  .pb-row { display:flex; align-items:center; gap:8px; padding:7px 10px; border:1px solid var(--line-soft); border-radius:8px; font-size:12.5px; color:var(--ink-2); cursor:pointer; }
+  .pb-row:hover { border-color:var(--line); }
+  .pb-row input { accent-color:var(--accent); margin:0; flex:none; }
+  .pb-row .pb-tag { flex:none; font-weight:550; color:var(--ink); }
+  .pb-row .pb-meta { color:var(--ink-3); font-size:11.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
 .acc td.fl { line-height: 1.35; }
 .acc td.fl .fl-row { display: block; font-variant-numeric: tabular-nums; }
 .acc td.fl .fl-sub { font-size: 11.5px; color: var(--ink-3); }
@@ -774,6 +796,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#accounts" data-view="accounts" class="on">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
         账号池</a></li>
+      <li><a href="#proxies" data-view="proxies">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="3.5" cy="3.5" r="1.6"/><circle cx="12.5" cy="3.5" r="1.6"/><circle cx="3.5" cy="12.5" r="1.6"/><circle cx="12.5" cy="12.5" r="1.6"/><path d="M5.1 3.5h5.8M3.5 5.1v5.8M12.5 5.1v5.8M5.1 12.5h5.8M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>
+        代理池</a></li>
       <li><a href="#usage" data-view="usage">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
         用量</a></li>
@@ -879,6 +904,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </select>
           <button class="xs" id="btnPauseSel" title="对勾选的账号暂停选号（签到 / 保活照常）">暂停所选</button>
           <button class="xs" id="btnResumeSel" title="对勾选的账号恢复选号">恢复所选</button>
+          <button class="xs" id="btnBindProxy" title="为勾选的账号统一绑定出口代理（多号可共用同一节点；不勾选则不可用）">绑定代理</button>
           <button class="xs" id="btnRemarks">备注</button>
           <button class="xs" id="btnCheckinAll">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
@@ -890,7 +916,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
             <th class="pick"><input type="checkbox" id="accPickAll" title="全选 / 全不选（批量暂停·恢复选号用）" aria-label="全选账号"></th>
-            <th>账号</th><th>状态</th><th>积分</th>
+            <th>账号</th><th>状态</th><th>代理</th><th>积分</th>
             <th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>
@@ -914,6 +940,48 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </tr></thead>
           <tbody id="mlBody"></tbody>
         </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 代理池：机场订阅导入节点，账号可绑定出口代理（多号共用同一出口 IP） -->
+    <section class="view" id="view-proxies" hidden>
+      <div class="box">
+        <header>
+          <h3>机场订阅 <span class="hint">从订阅链接批量导入节点，导入后自动按订阅同步更新</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="subNote"></span>
+          <button class="xs" id="btnSubAdd" title="添加机场订阅链接并立即拉取一次节点">添加订阅</button>
+        </header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th>名称</th><th>URL</th><th class="num">节点数</th><th>最后同步</th><th class="c-acts"></th>
+            </tr></thead>
+            <tbody id="subBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="box">
+        <header>
+          <h3>节点 <span class="hint">勾选后可批量测试 / 启停 / 删除；账号在账号池页绑定这里的节点</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="proxySelNote"></span>
+          <button class="xs" id="btnProxyTestSel" title="对勾选的节点发起一次批量测速，汇总成功 / 失败">批量测试</button>
+          <button class="xs" id="btnProxyEnableSel" title="启用勾选的节点">批量启用</button>
+          <button class="xs" id="btnProxyDisableSel" title="停用勾选的节点">批量停用</button>
+          <button class="xs" id="btnProxyDelSel" title="删除勾选的节点（已绑定账号自动改回直连）">批量删除</button>
+          <button class="xs primary" id="btnProxyAdd" title="手动粘贴节点链接或 Clash YAML 节点段">添加节点</button>
+        </header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th class="pick"><input type="checkbox" id="proxyPickAll" title="全选 / 全不选（批量测试·启停·删除用）" aria-label="全选节点"></th>
+              <th>名称</th><th>协议</th><th>服务器</th><th>来源</th>
+              <th class="num">已绑定</th><th class="num">延迟</th><th>状态</th><th class="c-acts"></th>
+            </tr></thead>
+            <tbody id="proxyBody"></tbody>
+          </table>
         </div>
       </div>
     </section>
@@ -1804,6 +1872,64 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <span class="grow"></span>
       <button class="xs" id="btnVcRefresh">刷新</button>
       <button class="xs primary" id="btnVcClose">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 添加订阅 -->
+<div class="veil" id="subVeil">
+  <div class="dlg" style="width:520px">
+    <header>
+      <h3>添加订阅</h3>
+      <div class="hint">粘贴机场订阅链接（http / https），保存后立即拉取一次节点。名称留空则显示为「未命名」（节点来源列显示订阅 id）。</div>
+    </header>
+    <div class="body">
+      <input type="text" id="subNameInput" placeholder="名称（可选）" autocomplete="off" style="width:100%;margin-bottom:8px">
+      <input type="text" id="subUrlInput" placeholder="https://example.com/api/v1/client/subscribe?token=..." autocomplete="off" style="width:100%">
+      <div class="state err" id="subErr" hidden style="margin-top:10px"></div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnSubCancel">取消</button>
+      <button class="primary" id="btnSubCreate">保存并导入</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 手动添加节点 -->
+<div class="veil" id="proxyAddVeil">
+  <div class="dlg" style="width:560px">
+    <header>
+      <h3>添加节点</h3>
+      <div class="hint">每行一条：支持 ss:// 等分享链接，或直接粘贴 Clash YAML 的 proxies 节点段；无法解析的行会跳过并计数。</div>
+    </header>
+    <div class="body">
+      <textarea id="proxyPaste" rows="9" style="width:100%" placeholder="ss://YWVzLTI1Ni1nY206...@1.2.3.4:8388#HK-01&#10;ssr://... trojan://...&#10;proxies:&#10;  - {name: HK-02, type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: &quot;xx&quot;}"></textarea>
+      <div class="state err" id="proxyPasteErr" hidden style="margin-top:10px"></div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnProxyAddCancel">取消</button>
+      <button class="primary" id="btnProxyImport">导入</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 为账号绑定代理：单号（行内「代理」按钮）与批量（勾选 + 工具条「绑定代理」）共用 -->
+<div class="veil" id="proxyVeil">
+  <div class="dlg" style="width:640px">
+    <header>
+      <h3 id="proxyVeilTitle">绑定代理</h3>
+      <div class="hint">为勾选的账号统一选择出口节点，多个账号可共用同一节点；选「直连」即解除绑定。</div>
+    </header>
+    <div class="body">
+      <div class="pb-list" id="proxyBindList"></div>
+      <div class="state err" id="proxyBindErr" hidden style="margin-top:10px"></div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnProxyBindCancel">取消</button>
+      <button class="primary" id="btnProxyBindSave">确认绑定</button>
     </footer>
   </div>
 </div>

@@ -21,6 +21,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
+
 	"github.com/misakano7545/workbuddy2api-panel/internal/alert"
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/balance"
@@ -208,6 +210,49 @@ func main() {
 	}
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
+
+	// 代理池（账号级出站代理，config 不加新键）：proxies.json 与 state.json 同目录；
+	// per-proxy transport 以上游 newTransport 的导出底座为构造器（连接层加固参数
+	// 单一事实来源），并补上与 ChatHTTP 相同的响应头超时——域名解析交节点远端，
+	// 不走上面的 DNS 覆盖。订阅只在面板同步时按需拉取，无全局轮询任务。
+	proxypoolSvc := proxypool.New(stateSibling(cfg.StateFile, "proxies.json"), func() *http.Transport {
+		tr := upstream.NewTransport()
+		tr.ResponseHeaderTimeout = up.HeaderTimeout
+		return tr
+	})
+	defer proxypoolSvc.Close()
+	// 建连上限与共享 transport 同一常量：节点 transport 整体替换了 DialContext，
+	// 底座的 net.Dialer.Timeout 不参与，必须由 proxypool 侧用 ctx 兜住（否则黑洞
+	// 地址要等系统 TCP 重传窗口才失败）。
+	proxypoolSvc.SetNodeDialTimeout(upstream.DialTimeout)
+	// 删除/同步移除的节点 → ①自动解绑其上账号（池侧批量清绑定）②淘汰 upstream 侧
+	// 按节点 ID 缓存的 client 条目（让失效 transport 及早释放）。
+	proxypoolSvc.SetUnbindCallback(func(ids []string) []string {
+		idSet := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			idSet[id] = true
+		}
+		up.EvictAccountClients(ids...)
+		return p.ClearProxyIfMatch(idSet)
+	})
+	// 按账号分流：upstream 每次出站前经此解析账号应走的 transport（未绑定/停用 → nil 直连）。
+	// 第二返回值是稳定缓存键（节点 ID）：节点内容变更新 transport 时 client 条目原地
+	// 替换，不会随版本数堆积。
+	up.SetAccountTransport(func(a *auth.Auth) (*http.Transport, string) {
+		id := p.AccountProxy(a.UID)
+		if id == "" {
+			return nil, ""
+		}
+		return proxypoolSvc.TransportFor(id), id
+	})
+	// WAF 出口分组：「实际出口」而非绑定意图——绑定已删/停用节点（或节点解析失败）
+	// 的账号实际都走直连（TransportFor 回落 nil），必须与直连账号同组；否则这些
+	// 账号各自独立分组，直连组的 WAF 判定被稀释。exitOf 是唯一口径，
+	// ExitTagOf 与面板视图都从它派生。
+	exitOf := proxyExitKeyOf(p, proxypoolSvc)
+	log.Printf("[proxypool] 代理池已启用: %s（%d 节点 / %d 订阅）",
+		stateSibling(cfg.StateFile, "proxies.json"), len(proxypoolSvc.List()), len(proxypoolSvc.Subs()))
+
 	up.SanitizeFingerprints.Store(cfg.Features.SanitizeBlacklistFingerprints)
 	up.SanitizeBrandScope.Store(cfg.Features.SanitizeBrandScope)
 	// 思考档位策略（thinking 节）：启动装载，面板保存配置时经 saveConfig 热更新。
@@ -420,6 +465,8 @@ func main() {
 		RequestLog: requestLog,
 		Upstream:   up,
 		Scheduler:  sch,
+		// 代理池：节点/订阅管理与账号绑定视图（nil = 相关接口 501）。
+		Proxypool: proxypoolSvc,
 		// 降级路由表：面板据此在限流提示里标注「已路由至 <等价模型>」。
 		ModelFallback: func() map[string]string { return live.Load().ModelFallback },
 		// 余额趋势采样记录器：nil 时该视图返回 501。
@@ -494,7 +541,11 @@ func main() {
 		Live:         live,
 		Usage:        rec,
 		RequestLog:   requestLog,
-		PromptMode:   cfg.Prompt.Mode,
+		// WAF IP 级拦截按出口分组：exitKey = **实际出口**节点 ID（"" = 直连组）。
+		// 绑定已删/停用节点或节点解析失败的账号实际走直连，与直连账号同组，
+		// 否则直连组的判定被稀释（见上方 exitOf 定义）。
+		ExitTagOf:  exitOf,
+		PromptMode: cfg.Prompt.Mode,
 		// 模型降级路由表：读 live 快照（支持面板热更，改完即生效、无需重启）。
 		ModelFallback: func() map[string]string { return live.Load().ModelFallback },
 		PromptText:    cfg.PromptText,
