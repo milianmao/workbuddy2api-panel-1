@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -313,6 +314,9 @@ type Config struct {
 		// 非正值（priority ≤ 0 / share ≤ 0）由校验剔除，等价于未配置。
 		AccountPriority map[string]int     `json:"account_priority"`
 		AccountShare    map[string]float64 `json:"account_share"`
+		// 每账号日限额按北京时间重置：0 不限额；覆盖表 null/缺席继承默认，显式 0 单号不限额。
+		DailyCreditLimit         float64             `json:"daily_credit_limit"`
+		AccountDailyCreditLimits map[string]*float64 `json:"account_daily_credit_limits"`
 		// CreditFloor 积分保底：账号余额低于该值时，对实测收费模型（tier 2）不再
 		// 参与选号——防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到。
 		// tier 0（免费）不受限；tier 1（无观测）按目录倍率分档：≤ 下面的
@@ -769,8 +773,17 @@ func splitCSV(raw string) []string {
 	return out
 }
 
+// normalize 统一校验启动和热更新配置，非法日额度在落盘及应用前拒绝。
 func (c *Config) normalize() error {
 	var err error
+	if c.Pool.DailyCreditLimit < 0 || math.IsNaN(c.Pool.DailyCreditLimit) || math.IsInf(c.Pool.DailyCreditLimit, 0) {
+		return fmt.Errorf("pool.daily_credit_limit 必须是非负有限积分；0 = 不限额")
+	}
+	for uid, limit := range c.Pool.AccountDailyCreditLimits {
+		if strings.TrimSpace(uid) == "" || (limit != nil && (*limit < 0 || math.IsNaN(*limit) || math.IsInf(*limit, 0))) {
+			return fmt.Errorf("pool.account_daily_credit_limits[%q] 必须是非负有限积分或 null（继承默认）", uid)
+		}
+	}
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
 	}

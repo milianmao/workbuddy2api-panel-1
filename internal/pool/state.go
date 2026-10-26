@@ -446,7 +446,7 @@ func (p *Pool) AvailableUIDs() []string {
 	now := time.Now()
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
-		if !e.healthy(now) {
+		if !e.healthy(now) || p.dailyQuotaBlocked(e, now) {
 			continue
 		}
 		if p.inFlightFull(e) {
@@ -467,7 +467,7 @@ func (p *Pool) AvailableUIDsForModel(model string) []string {
 	now := time.Now()
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
-		if !e.healthyForModel(now, model) {
+		if !e.healthyForModel(now, model) || p.dailyQuotaBlocked(e, now) {
 			continue
 		}
 		if p.inFlightFull(e) {
@@ -488,6 +488,9 @@ func (p *Pool) CapacityForModel(model, realm string) (modelAvailable, poolAvaila
 
 	now := time.Now()
 	for _, e := range p.byUID {
+		if p.dailyQuotaBlocked(e, now) {
+			continue
+		}
 		if e.healthy(now) {
 			poolAvailable++
 		}
@@ -625,7 +628,7 @@ func (p *Pool) RealmHealth(realm string) RealmHealth {
 			} else {
 				h.Paused++
 			}
-		case !e.healthy(now):
+		case !e.healthy(now) || p.dailyQuotaBlocked(e, now):
 			h.Cooling++
 		default:
 			h.Healthy++
@@ -743,7 +746,7 @@ func (p *Pool) sharePoolLocked(cands []*entry) []*entry {
 // 未占满在途 + 未因保留积分停牌（免费档豁免，见 modelFreeOf）。选号入口统一走这里，
 // 「不可选」的 policy 只此一处。
 func (p *Pool) selectable(e *entry, now time.Time, model string) bool {
-	if p.inFlightFull(e) || p.reserveBlocked(e, p.modelFreeOf(e, model)) {
+	if p.inFlightFull(e) || p.reserveBlocked(e, p.modelFreeOf(e, model)) || p.dailyQuotaBlocked(e, now) {
 		return false
 	}
 	if model != "" {
@@ -771,7 +774,7 @@ func (p *Pool) ServableForRealm(realm string) bool {
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		if p.inFlightFull(e) {
+		if p.inFlightFull(e) || p.dailyQuotaBlocked(e, now) {
 			continue
 		}
 		if p.reserveBlocked(e, false) {
@@ -805,7 +808,8 @@ func (p *Pool) List() []Status {
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
 	st := Status{
-		UID: uid,
+		DailyQuota: p.dailyQuotaOf(e, now),
+		UID:        uid,
 		// 限额台账（issue #36）：仅「带解析时间 6004 的模型级软冷却」仍在生效时非空，
 		// 每模型一行（modelCooldowns 内未到期的条目），多模型同时限流全部展示。
 		// 到期判据 = 该模型的独立冷却 until 未过；条件满足才输出，随到期自然消失，

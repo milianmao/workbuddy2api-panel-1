@@ -844,7 +844,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <th class="mark" aria-hidden="true"></th>
             <th class="pick"><input type="checkbox" id="accPickAll" title="全选 / 全不选（批量暂停·恢复选号用）" aria-label="全选账号"></th>
             <th>账号</th><th>状态</th><th>代理</th><th>积分</th><th title="今日实测扣费：上游 usage 回执里的 credit 累加（仅统计拿到回执的请求）；「—」= 无法统计（未装配用量记录器，或今天有请求但没拿到扣费回执）">今日已用</th>
-            <th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
+            <th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th>每日限额</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>
         </table>
@@ -1382,6 +1382,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">保留积分</span>
                 <input name="reserve_credits" type="number" min="0" placeholder="10">
                 <span class="hint">余额低于该值的账号停止接单（0 = 关闭，缺省 10）</span></label>
+              <label class="fld"><span class="lb">账号每日默认限额（积分）</span>
+                <input name="daily_credit_limit" type="number" min="0" step="any" placeholder="0">
+                <span class="hint">0 = 不限额。含聊天、图片及后台模型任务，北京时间零点恢复；单账号可在账号列表覆盖。</span></label>
             </div>
             <div class="switch"><span class="lb">快过期积分优先</span>
               <input type="checkbox" name="prefer_expiring"></div>
@@ -1569,6 +1572,28 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
       </div>
     </section>
+  </div>
+</div>
+
+<!-- 单账号日限额：只保存当前账号的覆盖值，避免覆盖其他账号和全局配置。 -->
+<div class="veil" id="dailyQuotaVeil">
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dailyQuotaTitle">
+    <header><h3 id="dailyQuotaTitle">账号每日限额</h3></header>
+    <div class="body">
+      <label class="fld"><span class="lb">限额方式</span>
+        <select id="dailyQuotaMode">
+          <option value="inherit">继承默认额度</option>
+          <option value="custom">自定义额度</option>
+          <option value="unlimited">不限额</option>
+        </select>
+      </label>
+      <label class="fld"><span class="lb">每日积分额度</span>
+        <input id="dailyQuotaLimit" type="number" min="0" step="any" placeholder="请输入积分额度">
+      </label>
+      <p class="hint">按北京时间累计聊天、图片及后台模型任务的实测扣费，零点恢复。已发出的请求会继续完成，最终消耗可能超过额度。</p>
+      <div class="state" id="dailyQuotaError" role="alert" hidden></div>
+    </div>
+    <footer><span class="grow"></span><button id="btnDailyQuotaClose">取消</button><button class="primary" id="btnDailyQuotaSave">保存</button></footer>
   </div>
 </div>
 

@@ -1171,6 +1171,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.prep, st.do = hopTiming.Prep, hopTiming.Do
 		st.effort = hopTiming.Effort
 		st.effortReq = hopTiming.RequestedEffort
+		var dailyLimited *pool.DailyQuotaError
+		if errors.As(terr, &dailyLimited) {
+			lastErr = terr
+			// 额度在选号后被其他在途请求用完：解绑换号，不进入传输失败连败惩罚。
+			fail(acct.UID)
+			continue
+		}
 		// 分类信封一次成型：upstream 已在错误路径返回 *upstream.Error（Kind +
 		// Retry-After 头解析）。传输层错误（非 *Error）走抖动换号分支；防御分支
 		// （terr 为 nil 但 status>=400，如 ErrNone 兜底）回落本地 Classify，双保险。
@@ -1601,6 +1608,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 末端错误透传（error-passthrough）：上游返回的错误原样透传，不再规范化成固定文案。
+	if limited := h.cfg.Pool.DailyQuotaErrorForRealm(realm, curModel); limited != nil {
+		writeDailyQuotaError(w, limited)
+		st.status, st.outcome = http.StatusTooManyRequests, reqlog.OutcomeHTTPError
+		return
+	}
 	// 上游返回（*upstream.Error）→ error.message 装**上游 body 原文**（code/msg/
 	// requestId 原样保留）。HTTP 状态码按 OpenAI 兼容口径映射类别：ErrSoftRate → 429
 	// （限流语义、客户端应等待重试），其余保持 503。本地调度类错误（无可用账号/

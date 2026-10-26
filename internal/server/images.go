@@ -147,6 +147,11 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	}
 
 	status, code := http.StatusBadGateway, "upstream_error"
+	if limited := h.cfg.Pool.DailyQuotaErrorForRealm(realm, bare); limited != nil {
+		writeDailyQuotaError(w, limited)
+		st.status, st.outcome = http.StatusTooManyRequests, "http_error"
+		return
+	}
 	var ue *upstream.Error
 	switch {
 	case len(tried) == 0: // 一个可用账号都没有：没有可重试的对象，明确说清楚
@@ -196,13 +201,13 @@ func recordImageUsage(h *Handler, st *chatStat, realm, uid, bare, modelRate stri
 		Quality string `json:"quality"`
 		Size    string `json:"size"`
 		Usage   struct {
-			InputTokens   int64   `json:"input_tokens"`
-			OutputTokens  int64   `json:"output_tokens"`
-			TotalTokens   int64   `json:"total_tokens"`
-			Credit        float64 `json:"credit"`
-			ImageCounts   int64   `json:"output_image_counts"`
-			ImageTokens   int64   `json:"output_image_tokens"`
-			Coefficient   float64 `json:"output_image_coefficient"`
+			InputTokens  int64   `json:"input_tokens"`
+			OutputTokens int64   `json:"output_tokens"`
+			TotalTokens  int64   `json:"total_tokens"`
+			Credit       float64 `json:"credit"`
+			ImageCounts  int64   `json:"output_image_counts"`
+			ImageTokens  int64   `json:"output_image_tokens"`
+			Coefficient  float64 `json:"output_image_coefficient"`
 		} `json:"usage"`
 	}
 	_ = json.Unmarshal(data, &env) // 上游省略 usage 时零值：下面按「有没有真值」决定是否记账

@@ -82,6 +82,9 @@ func (c *Client) WebFetch(ctx context.Context, a *auth.Auth, url string) (json.R
 // 同头（ChatHeaders，零值 ChatMeta 由三件套兜底恒发），≥400 交 Classify 定 Kind
 // 供调用方走同一套失败处置。
 func (c *Client) agentTool(ctx context.Context, a *auth.Auth, path string, body []byte) (json.RawMessage, error) {
+	if err := c.checkAccountQuota(a); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatBase(a)+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -118,6 +121,12 @@ func (c *Client) agentTool(ctx context.Context, a *auth.Auth, path string, body 
 		}
 		return nil, &Error{Kind: kind, Status: resp.StatusCode,
 			Msg: fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160))}
+	}
+	// 检索 RPC 通常不带计费回执；只累计明确返回的扣费，不把无回执的网页工具标作模型用量缺失。
+	if c.AccountCreditObserver != nil {
+		if credit, observed := modelCredit(raw); observed {
+			c.AccountCreditObserver(a.UID, credit, true)
+		}
 	}
 	return json.RawMessage(raw), nil
 }

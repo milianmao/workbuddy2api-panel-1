@@ -88,6 +88,9 @@ type Pool struct {
 	// issue #62：同一层内配了占比的账号独占抽签，按 share 归一化分流量（70/30 与
 	// 7/3 同义，不必凑满 100）。缺省 nil = 全部未配置（行为与旧版一致）。
 	accountShare map[string]float64
+	// 每日额度来自配置；实测消费存于 entry，热更新额度不重置账本。
+	dailyCreditLimit         float64
+	accountDailyCreditLimits map[string]float64
 	// randInt64N 仅供测试注入确定性随机源；nil 时用 math/rand/v2 全局源。
 	// 生产代码不应设置此字段。
 	randInt64N func(n int64) int64
@@ -368,6 +371,10 @@ func (p *Pool) Acquire(uid string) bool {
 	p.mu.RLock()
 	e, ok := p.byUID[uid]
 	if !ok {
+		p.mu.RUnlock()
+		return false
+	}
+	if p.dailyQuotaBlocked(e, time.Now()) {
 		p.mu.RUnlock()
 		return false
 	}

@@ -712,16 +712,23 @@ func anthropicErrType(status int) string {
 	}
 }
 
+// anthropicErrorBody 保留 Anthropic 的标准错误类型，同时保留网关业务 code 供客户端区分限额原因。
 func anthropicErrorBody(status int, obj map[string]any) []byte {
 	msg := "upstream error"
+	code := ""
 	if e, ok := obj["error"].(map[string]any); ok {
 		if m := asString(e["message"]); m != "" {
 			msg = m
 		}
+		code = asString(e["code"])
+	}
+	errBody := map[string]any{"type": anthropicErrType(status), "message": msg}
+	if code != "" {
+		errBody["code"] = code
 	}
 	raw, _ := json.Marshal(map[string]any{
 		"type":  "error",
-		"error": map[string]any{"type": anthropicErrType(status), "message": msg},
+		"error": errBody,
 	})
 	return raw
 }

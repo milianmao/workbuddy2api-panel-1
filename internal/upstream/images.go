@@ -40,12 +40,25 @@ const (
 // ImageGenerations 文生图，返回上游 data 对象（OpenAI 形状，可直接透出）。
 // 复用 growthJSON：同 chatBase、同 BillingHeaders、同信封解码与 *Error 语义。
 func (c *Client) ImageGenerations(a *auth.Auth, body any) (json.RawMessage, error) {
-	return c.growthJSON(a, http.MethodPost, imagesPath, body)
+	return c.imageCall(a, imagesPath, body)
 }
 
 // ImageEdits 图生图（image 为 data URL 数组），同样返回 OpenAI 形状的 data。
 func (c *Client) ImageEdits(a *auth.Auth, body any) (json.RawMessage, error) {
-	return c.growthJSON(a, http.MethodPost, editsPath, body)
+	return c.imageCall(a, editsPath, body)
+}
+
+// imageCall 让生成和编辑共用准入/结算，保留 growthJSON 的信封与错误处理。
+func (c *Client) imageCall(a *auth.Auth, path string, body any) (json.RawMessage, error) {
+	if err := c.checkAccountQuota(a); err != nil {
+		return nil, err
+	}
+	data, err := c.growthJSON(a, http.MethodPost, path, body)
+	if err == nil && c.AccountCreditObserver != nil {
+		credit, observed := modelCredit(data)
+		c.AccountCreditObserver(a.UID, credit, observed)
+	}
+	return data, err
 }
 
 // ImageChargeAgg 出图实扣按「尺寸 × 画质」分档的聚合（见 RecordImageCharge）。
@@ -79,7 +92,7 @@ type ImageChargeAgg struct {
 	// 原值，CN 恒 1、global 不回该字段）。只展示：它是上游自己的口径，本网关
 	// 不拿它重算价格——重算出来的数跟回执 credit 对不上就是二次编数。
 	LastCoefficient float64 `json:"last_output_image_coefficient,omitempty"`
-	LastAt      string  `json:"last_at,omitempty"`
+	LastAt          string  `json:"last_at,omitempty"`
 }
 
 // imageChargeKey 分档键：域:模型@尺寸/画质（缺项记 "-"，保证桶不串）。
@@ -218,11 +231,13 @@ func sortedInfos(byID map[string]ModelInfo) []ModelInfo {
 // /v1/models 等于引诱客户端选一个必然失败的模型（客户端枚举列表即踩）。
 //
 // 2026-10-22 复测（两个个人号，直连上游）：
-//   cn:hunyuan-image-alpha 200 → usage{output_image_coefficient:1, credit:5.71}
-//   global:hy-image-3.5    200 → usage{output_image_tokens:15000, credit:0.27}
-//   global:gpt-image-2.5-sunburst → **400 code=14401 route config not found**
-//     （已下架；两个域的目录里都不再有它，global 目录把可用出图模型只放在
-//     modelPromotions 里，见 fetchV3ConfigModelMap 的补入逻辑）
+//
+//	cn:hunyuan-image-alpha 200 → usage{output_image_coefficient:1, credit:5.71}
+//	global:hy-image-3.5    200 → usage{output_image_tokens:15000, credit:0.27}
+//	global:gpt-image-2.5-sunburst → **400 code=14401 route config not found**
+//	  （已下架；两个域的目录里都不再有它，global 目录把可用出图模型只放在
+//	  modelPromotions 里，见 fetchV3ConfigModelMap 的补入逻辑）
+//
 // 所以 sunburst 这条映射已作废：留着只会把一个必失败的模型列给客户端。
 //
 // ponytail: 只写实测过的组合，未知模型照旧列出（不猜）；图像模型变多时改成探测一次路由
