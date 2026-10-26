@@ -98,6 +98,9 @@ const ctx = {
   remarkName: (uid, html2) => html2,
   rateLimitRowsHtml: () => '', formatTokenCount: () => '0', formatLatency: () => '-', formatRate: () => '-',
   disabledKind: () => null, disabledAge: () => '',
+  // 上游 4662949 起 renderAccounts 改用 setHTML（内容相同不碰 DOM）做增量重绘，
+  // 该 helper 定义在切片之外，这里必须给等效实现——直接写 innerHTML 即可。
+  setHTML: (el, html) => { el.innerHTML = html; },
 };
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) +

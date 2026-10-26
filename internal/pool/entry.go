@@ -262,8 +262,8 @@ type entry struct {
 	// hold 「新增待确认」：与 paused 正交的标记，只在 paused 时有意义。由 Hold() 置位；
 	// Resume（人工恢复选号）= 确认可用，一并清除。Revive（解冻）不清它，因此签到/保活/
 	// 一键解冻都不会把未确认的新号推进转发路径。持久化（state.json）。
-	hold     bool
-	reason   string
+	hold   bool
+	reason string
 	// disabledAt 禁用时刻（零值 = 未禁用）。与 reason 配对：运维需要知道
 	// 「什么时候被禁的」——同样一句 401，是刚刚发生还是挂了一周，处置完全不同。
 	disabledAt time.Time
@@ -530,19 +530,19 @@ func (e *entry) fallbackKind(now time.Time) string {
 
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
-	Credits          int64     `json:"credits"`
-	CreditsRemainder float64   `json:"credits_remainder,omitempty"`
-	CreditsTotal     int64     `json:"credits_total,omitempty"`
-	Disabled         bool      `json:"disabled"`
-	Paused           bool      `json:"paused,omitempty"`
+	Credits          int64   `json:"credits"`
+	CreditsRemainder float64 `json:"credits_remainder,omitempty"`
+	CreditsTotal     int64   `json:"credits_total,omitempty"`
+	Disabled         bool    `json:"disabled"`
+	Paused           bool    `json:"paused,omitempty"`
 	// Hold 新增待确认标记（entry.hold 同源）。持久化：重启后仍须人工确认才进选号池，
 	// 否则一次容器重启就把未确认的新号放上流量。
-	Hold             bool      `json:"hold,omitempty"`
-	Reason           string    `json:"reason,omitempty"`
-	DisabledAt       time.Time `json:"disabled_at,omitempty"` // 禁用时刻（持久化：重启后仍能看出禁了多久）
-	Until            time.Time `json:"until,omitempty"`
-	CoolKind         CoolKind  `json:"cool_kind"`
-	SuccessCount     int64     `json:"success_count,omitempty"`
+	Hold         bool      `json:"hold,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+	DisabledAt   time.Time `json:"disabled_at,omitempty"` // 禁用时刻（持久化：重启后仍能看出禁了多久）
+	Until        time.Time `json:"until,omitempty"`
+	CoolKind     CoolKind  `json:"cool_kind"`
+	SuccessCount int64     `json:"success_count,omitempty"`
 	// err_total 累计错误计数。旧版 err_count（连续错误）仍可读：加载时映射到 err_total，
 	// 仅作一次性迁移，不再回写 err_count。
 	ErrTotal    int64     `json:"err_total,omitempty"`
