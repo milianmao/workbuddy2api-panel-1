@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
+	"github.com/misakano7545/workbuddy2api-panel/internal/usage"
 )
 
 // proxyImportMaxBytes 导入请求体上限。该接口与网关同进程（共用内存），一次粘贴
@@ -334,16 +336,18 @@ func (p *Panel) accountBindProxy(w http.ResponseWriter, r *http.Request) {
 
 // accountProxyViews 批量解出账号的 proxy_tag/proxy_ok（overview 注入用）：
 // proxy_tag = 绑定节点名（未绑/节点已删为 ""）；proxy_ok = 绑定节点仍存在且启用。
-func (p *Panel) accountProxyViews() map[string]proxyView {
+// list 由调用方传入已拉到的 pool.Status 切片：Pool.List() 是 O(n log n) 的排序
+// 快照，overview 本来就要一份，这里再拉一次纯属白做。
+func (p *Panel) accountProxyViews(list []pool.Status) map[string]proxyView {
 	views := map[string]proxyView{}
 	if p.cfg.Proxypool == nil || p.cfg.Pool == nil {
 		return views
 	}
-	for _, st := range p.cfg.Pool.List() {
+	for _, st := range list {
 		if st.ProxyID == "" {
 			continue
 		}
-		v := proxyView{ProxyID: st.ProxyID}
+		v := proxyView{}
 		if nv, ok := p.cfg.Proxypool.NodeView(st.ProxyID); ok {
 			v.ProxyTag = nv.Tag
 			v.ProxyOK = nv.Enabled
@@ -353,40 +357,74 @@ func (p *Panel) accountProxyViews() map[string]proxyView {
 	return views
 }
 
-// proxyView overview 里每个账号的代理三元组。
+// proxyView overview 里每个账号的代理展示字段。
+// 不带 ProxyID：那是 pool.Status 内联出来的原值，这里再存一份没人读（只增重复）。
 type proxyView struct {
-	ProxyID  string
 	ProxyTag string
 	ProxyOK  bool
 }
 
-// overviewAccounts 账号池视图 + 代理三字段注入（proxy_id 来自 pool.Status，
-// proxy_tag/proxy_ok 由 proxypool 解出）。
+// overviewAccounts 账号池视图 + 代理注入（proxy_id/proxy_tag/proxy_ok）+ 今日
+// 实测扣费积分注入。
 func (p *Panel) overviewAccounts() []accountOverview {
 	list := p.cfg.Pool.List()
-	if p.cfg.Proxypool == nil {
-		out := make([]accountOverview, len(list))
-		for i, st := range list {
-			out[i] = accountOverview{Status: st}
-		}
-		return out
+	var views map[string]proxyView
+	if p.cfg.Proxypool != nil {
+		views = p.accountProxyViews(list)
 	}
-	views := p.accountProxyViews()
+	// 今日积分一次算完再按下标查表：overview 是 5 秒轮询接口，不能每号各扫一遍桶。
+	// Usage 为 nil（未装配记录器）时 credits 保持 nil，四行契约退化为「字段全缺席」。
+	var credits map[string]usage.DayCredits
+	if p.cfg.Usage != nil {
+		credits = p.cfg.Usage.TodayCreditsByUID(time.Now())
+	}
 	out := make([]accountOverview, len(list))
 	for i, st := range list {
 		item := accountOverview{Status: st}
-		if v, ok := views[st.ProxyID]; ok && st.ProxyID != "" {
-			item.ProxyTag = v.ProxyTag
-			item.ProxyOK = v.ProxyOK
+		// 未绑定代理的账号直接跳过查表（accountProxyViews 也不收空 ProxyID，
+		// 两层都挡着，overview 不会因为空键读到别人的节点）。
+		if st.ProxyID != "" {
+			if v, ok := views[st.ProxyID]; ok {
+				item.ProxyTag = v.ProxyTag
+				item.ProxyOK = v.ProxyOK
+			}
+		}
+		// 映射见 CreditsUsedToday 的契约：没有记录器 → 缺席；今天没桶 → 0；
+		// 有桶且观测到回执 → 合计；有桶但零回执 → 缺席（花费未知，不能写 0）。
+		//
+		// 分支判据是「记录器在不在」，不是「结果 map 空不空」：TodayCreditsByUID 在
+		// 今天一条桶都没有时返回 nil，那和「压根没装配记录器」是两件事——混在一起就会把
+		// 整池空闲（夜间 / 刚部署 / 单号池）的所有行都打成「—」，而契约要求它们显示 0。
+		// 这里查的 credits 可能是 nil：nil map 的取值恒为 miss，正好走到 else → 0。
+		if p.cfg.Usage != nil {
+			if dc, ok := credits[st.UID]; ok {
+				if dc.Observed {
+					v := dc.Credits
+					item.CreditsUsedToday = &v
+				}
+				// 有桶但零回执：花费未知，保持缺席（「—」），不许写 0。
+			} else {
+				zero := 0.0
+				item.CreditsUsedToday = &zero
+			}
 		}
 		out[i] = item
 	}
 	return out
 }
 
-// accountOverview overview 账号行：pool.Status 内联展开 + 代理注入字段。
+// accountOverview overview 账号行：pool.Status 内联展开 + 代理注入字段 + 今日积分。
 type accountOverview struct {
 	pool.Status
 	ProxyTag string `json:"proxy_tag,omitempty"`
 	ProxyOK  bool   `json:"proxy_ok"`
+	// CreditsUsedToday 本地自然日（宿主本地日，见 usage.TodayCreditsByUID）内该
+	// 账号在本网关的实测扣费积分。pointer + omitempty 表达四种情形：
+	//   - 未装配用量记录器（Config.Usage == nil）→ 缺席，前端「—」；
+	//   - 记录器在、今天没有它的桶 → 0（本网关今天确实没为它花额度）；
+	//   - 今天有桶且至少一次 credit 回执 → CR 合计（免费/限免模型合法为 0）；
+	//   - 今天有桶但一次回执都没拿到 → 缺席，前端「—」。
+	// 最后一条是本字段的要点：「—」= 无法统计，不是 0。没观测到 credit 就断言
+	// 「没花钱」正是 usage 包注释禁掉的事（CRN 计数器就是为此存在）。
+	CreditsUsedToday *float64 `json:"credits_used_today,omitempty"`
 }

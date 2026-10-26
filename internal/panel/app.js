@@ -535,13 +535,13 @@ function renderAccounts(list) {
   accLast = rows;
   if (!rows.length) {
     if (!total) {
-      setHTML(tb, '<tr><td colspan="11"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');
     } else if (accRealmFilter === 'cn') {
-      setHTML(tb, '<tr><td colspan="11"><div class="empty"><div class="big">暂无国内版账号</div>当前账号池内均为国际版账号（共 ' + globalCnt + ' 个）</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">暂无国内版账号</div>当前账号池内均为国际版账号（共 ' + globalCnt + ' 个）</div></td></tr>');
     } else if (accRealmFilter === 'global') {
-      setHTML(tb, '<tr><td colspan="11"><div class="empty"><div class="big">暂无国际版账号</div>当前账号池内均为国内版账号（共 ' + cnCnt + ' 个）</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">暂无国际版账号</div>当前账号池内均为国内版账号（共 ' + cnCnt + ' 个）</div></td></tr>');
     } else {
-      setHTML(tb, '<tr><td colspan="11"><div class="empty"><div class="big">没有匹配的账号</div></div></td></tr>');
+      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">没有匹配的账号</div></div></td></tr>');
     }
     syncAccSel();
     return;
@@ -623,6 +623,13 @@ function renderAccounts(list) {
     const tags = (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') +
       (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') +
       (s.api_key ? ' <span class="realm-tag">API Key</span>' : '');
+    // 今日已用：credits_used_today 是「上游 usage 回执里的 credit 累加」，四种情形：
+    //   记录器没装 → 字段缺席；记录器在、今天没流量 → 0（真的没花钱）；
+    //   有流量且拿到≥1 条回执 → 数值（免费模型也可能是 0）；有流量但零回执 → 缺席。
+    // 所以缺席 = 无法统计（两种成因），绝不能渲染成 0——把「没观测」显示成 0 会让运维
+    // 误判「这个号今天没花钱」进而错配流量。数值沿用 fmtCredit（≤2 位、去尾零）；
+    // 该值只经 fmtCredit 或字面量「—」进模板，字符集仅数字 / . / - / —，故不套 esc()。
+    const usedToday = s.credits_used_today == null ? '—' : fmtCredit(s.credits_used_today);
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="pick"><input type="checkbox" class="pk" data-u="' + esc(s.uid) + '"' + (accSel.has(s.uid) ? ' checked' : '') + ' aria-label="选择该账号"></td>' +
@@ -630,6 +637,7 @@ function renderAccounts(list) {
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td>' + proxyCell(s) + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
+      '<td class="num" title="今日实测扣费：上游 usage 回执里的 credit 累加（仅统计拿到回执的请求）；「—」= 无法统计（未装配用量记录器，或今天有请求但没拿到扣费回执）">' + usedToday + '</td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +
       '<td class="num usage-cell" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +

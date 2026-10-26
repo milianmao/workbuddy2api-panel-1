@@ -170,9 +170,18 @@ const ctx = {
   remarkName: (uid, html2) => html2,
   rateLimitRowsHtml: () => '', formatTokenCount: () => '0', formatLatency: () => '-', formatRate: () => '-',
   disabledKind: () => null, disabledAge: () => '',
+  // renderAccounts 走上游的 setHTML 增量重绘：该 helper 在切片之外，给等效实现。
+  setHTML: (el, html) => { el.innerHTML = html; },
+  // 切片里带着 renderModelLocks，它调切片外的 fmtLocalDateTime；提前注入，免得
+  // 将来在这个上下文里用上模型锁渲染时报 ReferenceError。
+  fmtLocalDateTime: x => String(x),
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderAccounts = renderAccounts;', ctx);
+// 「今日已用」列依赖 fmtCredit（切片外）：求值真实实现，避免复制格式化逻辑。
+const helperSrc = src.slice(src.indexOf('function trimFixed'), src.indexOf('function fmtCreditRatio'));
+// 锚点缺失会退化成 slice(-1, n) / slice(start, -1) 的垃圾尾巴，静默把测试测空。
+assert.ok(helperSrc.includes('function fmtCredit'), 'fmtCredit not found');
+vm.runInContext(src.slice(start, end) + helperSrc + '\nthis.renderAccounts = renderAccounts;', ctx);
 
 // 表头列数 = 数据行格数（两行）/2（新增「代理」列必须同步，否则整表错位）。
 const bodyIdx = html.indexOf('id="accBody"');
@@ -181,7 +190,7 @@ const headStart = html.lastIndexOf('<thead>', bodyIdx);
 const headEnd = html.indexOf('</thead>', headStart);
 assert.ok(headStart > 0 && headEnd > headStart, 'accBody 前应有 thead');
 const thCount = (html.slice(headStart, headEnd).match(/<th[\s>]/g) || []).length;
-assert.strictEqual(thCount, 11, '账号表应有 11 列（含新增的代理列），得到 ' + thCount);
+assert.strictEqual(thCount, 12, '账号表应有 12 列（含代理、今日已用），得到 ' + thCount);
 ctx.renderAccounts([{ uid: 'b', credits: 5, credits_total: 10 }, { uid: 'a', credits: 9, credits_total: 10 }]);
 const tdCount = (tb.innerHTML.match(/<td/g) || []).length / 2;
 assert.strictEqual(tdCount, thCount, '账号表列数不一致：thead ' + thCount + ' vs 数据行 ' + tdCount);

@@ -134,9 +134,17 @@ const ctx = {
     return { label: '已禁用', tone: 'warn', action: '' };
   },
   disabledAge: () => '3 天前',
+  // 切片里还带着 renderModelLocks，它调切片外的 fmtLocalDateTime（app.js ~:686）。
+  // 现在没人在这里渲染模型锁，但缺这个注入，将来的改动会以 ReferenceError 崩掉。
+  fmtLocalDateTime: x => String(x),
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderAccounts = renderAccounts;', ctx);
+// 「今日已用」列依赖 fmtCredit（切片外）：求值真实实现，不在测试里造替身。
+const helperSrc = src.slice(src.indexOf('function trimFixed'), src.indexOf('function fmtCreditRatio'));
+// 无此守卫时锚点缺失会退化成 slice(-1, n) / slice(start, -1) 的垃圾尾巴：
+// 那段残缺代码或被当作语法错误炸掉，或被 eval 成功却什么也没测——测试静默腐朽。
+assert.ok(helperSrc.includes('function fmtCredit'), 'fmtCredit not found');
+vm.runInContext(src.slice(start, end) + helperSrc + '\nthis.renderAccounts = renderAccounts;', ctx);
 const base = { uid: 'u1', nickname: 'A', credits: 100, credits_total: 100, success_count: 1, err_total: 0 };
 ctx.renderAccounts([Object.assign({}, base, { paused: true })]);
 assert.ok(tb.innerHTML.includes('已暂停选号'), 'paused 行应显示已暂停选号: ' + tb.innerHTML);
