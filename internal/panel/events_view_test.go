@@ -29,6 +29,15 @@ const e = src.indexOf('\n}\n', src.indexOf('function deriveEventExecutor(ua) {')
 if (s < 0 || e < 0) throw new Error('events view block not found');
 const body = src.slice(s, e + 3);
 
+// 汇总条（renderEventStats）用到的 fmtMs / fmtNum 定义在切片之外。这里求值真实实现
+// 而不是塞 stub：格式化逻辑一旦回归，这个用例应该跟着炸，而不是被假函数蒙过去。
+function pickFn(name) {
+  const i = src.indexOf('function ' + name + '(');
+  if (i < 0) throw new Error(name + ' not found');
+  return src.slice(i, src.indexOf('\n}\n', i) + 3);
+}
+const fmtSrc = pickFn('fmtMs') + pickFn('fmtNum');
+
 function makeCtx(apiImpl) {
   const els = {};
   const el = (k) => (els[k] = els[k] || { textContent: '', value: '', innerHTML: '' });
@@ -41,7 +50,7 @@ function makeCtx(apiImpl) {
     renderEventTable: undefined,
   };
   vm.createContext(ctx);
-  vm.runInContext('let rawEventsData = [];\n' + body +
+  vm.runInContext('let rawEventsData = [];\n' + fmtSrc + body +
     '\nthis.populate = populateEventFilterOptions; this.render = renderEventTable;' +
     ' this.load = loadEvents; this.get = () => rawEventsData;', ctx);
   return { ctx, els, el };

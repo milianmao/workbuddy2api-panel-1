@@ -190,7 +190,7 @@ const headStart = html.lastIndexOf('<thead>', bodyIdx);
 const headEnd = html.indexOf('</thead>', headStart);
 assert.ok(headStart > 0 && headEnd > headStart, 'accBody 前应有 thead');
 const thCount = (html.slice(headStart, headEnd).match(/<th[\s>]/g) || []).length;
-assert.strictEqual(thCount, 13, '账号表应有 13 列（含代理、今日已用、每日限额），得到 ' + thCount);
+assert.strictEqual(thCount, 12, '账号表应有 12 列（含代理、今日已用、每日限额；在途并入成功/失败），得到 ' + thCount);
 ctx.renderAccounts([{ uid: 'b', credits: 5, credits_total: 10 }, { uid: 'a', credits: 9, credits_total: 10 }]);
 const tdCount = (tb.innerHTML.match(/<td/g) || []).length / 2;
 assert.strictEqual(tdCount, thCount, '账号表列数不一致：thead ' + thCount + ' vs 数据行 ' + tdCount);

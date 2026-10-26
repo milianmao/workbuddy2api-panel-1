@@ -635,20 +635,22 @@ function renderAccounts(list) {
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="pick"><input type="checkbox" class="pk" data-u="' + esc(s.uid) + '"' + (accSel.has(s.uid) ? ' checked' : '') + ' aria-label="选择该账号"></td>' +
       '<td class="who"><div class="nm"><span class="nm-name" title="' + esc(rawWho) + '">' + nameHtml + '</span>' + tags + '</div><div class="id" title="uid: ' + esc(s.uid) + '">' + esc(short) + '</div></td>' +
-      '<td>' + tag + note + rateLimits + '</td>' +
+      '<td class="st">' + tag + note + rateLimits + '</td>' +
       '<td>' + proxyCell(s) + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
-      '<td class="num" title="今日实测扣费：上游 usage 回执里的 credit 累加（仅统计拿到回执的请求）；「—」= 无法统计（未装配用量记录器，或今天有请求但没拿到扣费回执）">' + usedToday + '</td>' +
-      '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
-      '<td class="num">' + (s.in_flight || 0) + '</td>' +
+      '<td class="num used" title="今日实测扣费：上游 usage 回执里的 credit 累加（仅统计拿到回执的请求）；「—」= 无法统计（未装配用量记录器，或今天有请求但没拿到扣费回执）">' + usedToday + '</td>' +
+      // 「成功/失败」右侧接在途数：在途 >0 才追加，0 时只留在 title 里——
+      // 单独占一列的话 26 行全是 0，白占 36px 还挤走「每日限额」。
+      '<td class="num sf" title="成功 / 失败 · 在途 ' + (s.in_flight || 0) + '">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span>' +
+        ((s.in_flight || 0) > 0 ? '<span class="inflight">·' + s.in_flight + '</span>' : '') + '</td>' +
       '<td class="num usage-cell" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +
         '<span class="usage-item usage-count"><b>' + req + '</b><em>次</em></span>' +
         '<span class="usage-item usage-total"><b>' + totalTok + '</b>' + totalTokUnit + '</span>' +
         '<span class="usage-item usage-latency"><b>' + latency + '</b></span>' +
         '<span class="usage-item usage-rate"><b>' + rate + '</b></span>' +
       '</span></td>' +
-      '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
-      '<td class="num">' + dailyQuotaCell(s) + '</td>' +
+      '<td class="num lastok" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
+      '<td class="num dq">' + dailyQuotaCell(s) + '</td>' +
       '<td class="acts"><div class="acts-inner">' + [
         // 无个人成长体系的账号（企业版 / 静态 API Key）不渲染「签到」「任务」：前者
         // 上游 400「企业账号不支持该操作」，后者 403 growth-only；只留「额度」，点它走
@@ -5142,6 +5144,7 @@ async function loadEvents() {
     // 不能把失败渲染成「共 0 条事件」——归档没开和查询出错是两回事，用户得知道是哪种。
     rawEventsData = [];
     if ($('eventBadge')) $('eventBadge').textContent = '读取失败';
+    renderEventStats([]);
     if (tb) setHTML(tb, '<tr><td colspan="13" style="text-align:center;padding:20px;color:var(--err);">' +
       (err.status === 501 ? '请求归档未开启，事件日志不可用' : '读取失败: ' + esc(err.message || String(err))) + '</td></tr>');
   }
@@ -5187,6 +5190,7 @@ function renderEventTable() {
   });
 
   if ($('eventBadge')) $('eventBadge').textContent = '共 ' + filtered.length + ' 条事件';
+  renderEventStats(filtered);
 
   if (!filtered.length) {
     setHTML(tb, '<tr><td colspan="13" style="text-align:center;padding:30px;color:var(--ink-3);">没有符合筛选条件的请求事件</td></tr>');
@@ -5254,6 +5258,51 @@ function renderEventTable() {
   }).join('');
 
   setHTML(tb, html);
+}
+
+// renderEventStats 汇总当前筛选出的事件。
+//
+// 口径写死在这里，别改成「按尝试数」：reqlog 每条 Event = 一次客户端请求，上游重试
+// 次数记在 attempts 字段里且不重复入表，所以 ok/total 就是客户端视角的请求成功率。
+// 之前的坑是有页面把 attempts 当分母（重试多的模型成功率反而好看），运营据此判断
+// 上游好坏会得出相反结论。缺 status 的行按失败计（宁可保守，不能虚高）。
+function renderEventStats(list) {
+  const box = $('evStats');
+  if (!box) return;
+  const rows = list || [];
+  if (!rows.length) { box.hidden = true; box.innerHTML = ''; return; }
+  const okOf = e => !!(e.ok || (e.status >= 200 && e.status < 300));
+  let ok = 0, limited = 0, failed = 0, retried = 0;
+  const durs = [];
+  rows.forEach(e => {
+    if (okOf(e)) ok++;
+    else if (e.status === 429) limited++;
+    else failed++;
+    if ((e.attempts || 1) > 1) retried++;
+    if (e.duration_ms > 0) durs.push(e.duration_ms);
+  });
+  const total = rows.length;
+  const pctOf = n => total ? (n / total * 100).toFixed(1) + '%' : '—';
+  const successRate = total ? (ok / total * 100).toFixed(1) + '%' : '—';
+  durs.sort((a, b) => a - b);
+  const q = p => durs.length ? durs[Math.min(durs.length - 1, Math.floor(durs.length * p))] : null;
+  const cell = (k, v, s, cls) =>
+    '<div class="ev-stat' + (cls ? ' ' + cls : '') + '"><div class="k">' + k + '</div>' +
+    '<div class="v">' + v + '</div><div class="s">' + s + '</div></div>';
+  setHTML(box, cell('事件总数', fmtNum(total),
+      retried ? '含重试 ' + fmtNum(retried) + ' 条' : '均为单次尝试',
+      '') +
+    cell('成功', fmtNum(ok), '请求成功率 ' + successRate,
+      ok === total ? 'ok' : '') +
+    cell('429 限流', fmtNum(limited), '占 ' + pctOf(limited),
+      limited ? 'warn' : '') +
+    cell('其他失败', fmtNum(failed), '占 ' + pctOf(failed),
+      failed ? 'bad' : '') +
+    cell('延时 p50 / p95',
+      (q(0.5) == null ? '—' : fmtMs(q(0.5))) + ' / ' + (q(0.95) == null ? '—' : fmtMs(q(0.95))),
+      durs.length ? '有效样本 ' + fmtNum(durs.length) + ' 条' : '无耗时样本',
+      ''));
+  box.hidden = false;
 }
 
 function formatEventNum(n) {

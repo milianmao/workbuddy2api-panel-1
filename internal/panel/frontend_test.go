@@ -2109,7 +2109,8 @@ const headStart = html.lastIndexOf('<thead>', bodyIdx);
 const headEnd = html.indexOf('</thead>', headStart);
 const head = html.slice(headStart, headEnd);
 const thCount = (head.match(/<th[\s>]/g) || []).length;
-assert.strictEqual(thCount, 13, '账号表应有 13 列（含每日限额），得到 ' + thCount);
+// 12 列 = 13 列口径里把「在途」并进「成功/失败」那一格（在途 >0 时才追加显示）。
+assert.strictEqual(thCount, 12, '账号表应有 12 列（含每日限额；在途并入成功/失败），得到 ' + thCount);
 // 表头 tooltip 抓成变量：它和行内 title 必须是同一套口径，下面拿真实渲染出来的行做对拍。
 // 只断言「紧跟在积分之后」不够——两处文案各自漂移过一次（一处说「记录器不可用」、
 // 一处说「没装记录器时无此字段」），两种说法都没覆盖「有流量但零回执」这种情形。
@@ -2156,8 +2157,10 @@ const todayCells = s => {
 };
 // 拆出 <td …>值</td> 里的值，顺带校验格结构没被改坏（多标签就会在这里炸）。
 const cellParts = cell => {
-  const m = /^<td class="num" title="([^"]*)">([^<]*)<\/td>$/.exec(cell);
-  assert.ok(m, '今日已用格结构应为 <td class="num" title="…">值</td>: ' + cell);
+  // 允许 td 上追加样式类（如密度修正加的 .used）：这里校验的是格结构与文案，
+  // 不是 class 的精确写法——否则换个字号就得改测试，真正该挡的回归反而没人看。
+  const m = /^<td class="num(?: [\w-]+)*" title="([^"]*)">([^<]*)<\/td>$/.exec(cell);
+  assert.ok(m, '今日已用格结构应为 <td class="num …" title="…">值</td>: ' + cell);
   return { title: m[1], value: m[2] };
 };
 
