@@ -200,6 +200,11 @@ func (h *Handler) images(w http.ResponseWriter, r *http.Request, edit bool) {
 	}
 
 	status, code := http.StatusBadGateway, "upstream_error"
+	if limited := h.cfg.Pool.DailyQuotaErrorForRealm(realm, bare); limited != nil {
+		writeDailyQuotaError(w, limited)
+		st.status, st.outcome = http.StatusTooManyRequests, "http_error"
+		return
+	}
 	var ue *upstream.Error
 	switch {
 	case len(tried) == 0: // 一个可用账号都没有：没有可重试的对象，明确说清楚

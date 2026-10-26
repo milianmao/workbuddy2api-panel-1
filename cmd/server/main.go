@@ -159,6 +159,7 @@ func main() {
 	p.SetPreferExpiring(cfg.Pool.PreferExpiring, cfg.ExpiringSoonDur)
 	p.SetAccountPriority(cfg.Pool.AccountPriority) // 账号优先级/占比（issue #62）：空表 = 不启用
 	p.SetAccountShare(cfg.Pool.AccountShare)
+	p.SetDailyCreditLimits(cfg.Pool.DailyCreditLimit, cfg.Pool.AccountDailyCreditLimits)
 
 	// 会话粘性路由（可配关闭）。
 	var sessRouter *session.Router
@@ -188,6 +189,8 @@ func main() {
 	}
 
 	up := upstream.New()
+	up.AccountQuotaCheck = p.CheckDailyQuota
+	up.AccountCreditObserver = p.RecordDailyCredit
 
 	// 出站 DNS（config dns_servers / WB2A_DNS）：显式指定解析器，绕开系统配置。
 	// 典型场景是 Android（无 /etc/resolv.conf，Go 解析器退回 [::1]:53 全域名失败）
@@ -801,7 +804,12 @@ func effortPolicyOf(cfg *Config) *upstream.EffortPolicy {
 	}
 }
 
+var configSaveMu sync.Mutex
+
+// saveConfig 串行执行读-合并-写及热应用，防止不同账号的部分配置同时保存时互相覆盖。
 func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, gw *server.Handler, pn *panel.Panel, running ...*Config) ([]string, error) {
+	configSaveMu.Lock()
+	defer configSaveMu.Unlock()
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -910,6 +918,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetReserveCredits(*newCfg.Pool.ReserveCredits)  // 保留积分热生效（0 = 关闭，缺省 10）
 	p.SetAccountPriority(newCfg.Pool.AccountPriority) // 账号优先级/占比热生效（issue #62）
 	p.SetAccountShare(newCfg.Pool.AccountShare)
+	p.SetDailyCreditLimits(newCfg.Pool.DailyCreditLimit, newCfg.Pool.AccountDailyCreditLimits)
 	sch.Reconfigure(scheduler.ScheduleParams{
 		CheckinHours:   newCfg.Schedule.CheckinHours,
 		TravelHours:    newCfg.Schedule.TravelHours,

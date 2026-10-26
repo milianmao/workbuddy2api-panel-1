@@ -2109,7 +2109,7 @@ const headStart = html.lastIndexOf('<thead>', bodyIdx);
 const headEnd = html.indexOf('</thead>', headStart);
 const head = html.slice(headStart, headEnd);
 const thCount = (head.match(/<th[\s>]/g) || []).length;
-assert.strictEqual(thCount, 12, '账号表应有 12 列（新增今日已用），得到 ' + thCount);
+assert.strictEqual(thCount, 13, '账号表应有 13 列（含每日限额），得到 ' + thCount);
 // 表头 tooltip 抓成变量：它和行内 title 必须是同一套口径，下面拿真实渲染出来的行做对拍。
 // 只断言「紧跟在积分之后」不够——两处文案各自漂移过一次（一处说「记录器不可用」、
 // 一处说「没装记录器时无此字段」），两种说法都没覆盖「有流量但零回执」这种情形。
@@ -2199,7 +2199,7 @@ for (const [where, tip] of [['表头', headTitle], ['行内', cellTitle]]) {
   }
 }
 
-// 6) 空态 colspan 与表头列数一致（表头 12 / 数据行 12 / 空态 12）。
+// 6) 空态 colspan 与表头列数一致。
 ctx.renderAccounts([]);
 const col = /colspan="(\d+)"/.exec(tb.innerHTML);
 assert.ok(col && Number(col[1]) === thCount, '空态 colspan 应为 ' + thCount + '，得到 ' + (col && col[1]));

@@ -910,6 +910,9 @@ type Client struct {
 	// creditObserver 余额查询观察者（见 CreditObserver / SetCreditObserver）。
 	// atomic：启动期挂载、运行期并发读，不参与任何出站决策。
 	creditObserver atomic.Pointer[CreditObserver]
+	// 账号日限额回调由 main 装配后只读；仅模型推理入口调用，避免把签到/领奖一并拦住。
+	AccountQuotaCheck     func(uid string) error
+	AccountCreditObserver func(uid string, credit float64, observed bool)
 
 	// modelBusyUnsupported 上游 /v2/chat/busy 在该域不存在（国际版实测 404）。探到一次即置位，
 	// 本进程后续跳过探测（见 modelbusy.go）。atomic：并发调用只读+一次性写。
@@ -1601,6 +1604,9 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte, clientIP string, meta Cha
 // 反证，删了无回滚路径）。
 // timing 为可选分段耗时出参（nil = 零开销、零行为变化）。
 func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byte, clientIP string, meta ChatMeta, timing *ChatTiming) (rc io.ReadCloser, status int, respBody []byte, err error) {
+	if err := c.checkAccountQuota(a); err != nil {
+		return nil, 0, nil, err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1697,7 +1703,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
 		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
 		body := c.dumpUpstream(monitorBody(resp.Body, c.IdleTimeout, cancel), prepared, a)
-		return body, resp.StatusCode, nil, nil
+		return c.observeModelStream(a.UID, body), resp.StatusCode, nil, nil
 	}
 	panic("unreachable: chatPaths is never empty") // for range 空集时编译器仍要求兜底 return；chatPaths 恒非空（构造保证），永不触达
 }

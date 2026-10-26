@@ -47,7 +47,7 @@ func (p *Pool) AvailableUIDsForRealm(realm string) []string {
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		if !e.healthy(now) {
+		if !e.healthy(now) || p.dailyQuotaBlocked(e, now) {
 			continue
 		}
 		if p.inFlightFull(e) {
@@ -76,7 +76,7 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		if !e.healthyForModel(now, model) {
+		if !e.healthyForModel(now, model) || p.dailyQuotaBlocked(e, now) {
 			continue
 		}
 		if p.inFlightFull(e) {
@@ -112,7 +112,7 @@ func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 		if realm != "" && e.a.Realm() != realm {
 			continue
 		}
-		if !e.healthyForModel(now, model) {
+		if !e.healthyForModel(now, model) || p.dailyQuotaBlocked(e, now) {
 			continue
 		}
 		if p.inFlightFull(e) {

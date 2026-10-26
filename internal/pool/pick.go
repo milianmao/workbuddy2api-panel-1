@@ -340,6 +340,9 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		if e.modelCooled(now, model) {
 			continue // 兜底也不能绕过模型冷却或手动模型停牌。
 		}
+		if p.dailyQuotaBlocked(e, now) {
+			continue
+		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
 		}

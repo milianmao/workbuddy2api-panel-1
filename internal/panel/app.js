@@ -535,13 +535,13 @@ function renderAccounts(list) {
   accLast = rows;
   if (!rows.length) {
     if (!total) {
-      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="13"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');
     } else if (accRealmFilter === 'cn') {
-      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">暂无国内版账号</div>当前账号池内均为国际版账号（共 ' + globalCnt + ' 个）</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="13"><div class="empty"><div class="big">暂无国内版账号</div>当前账号池内均为国际版账号（共 ' + globalCnt + ' 个）</div></td></tr>');
     } else if (accRealmFilter === 'global') {
-      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">暂无国际版账号</div>当前账号池内均为国内版账号（共 ' + cnCnt + ' 个）</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="13"><div class="empty"><div class="big">暂无国际版账号</div>当前账号池内均为国内版账号（共 ' + cnCnt + ' 个）</div></td></tr>');
     } else {
-      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">没有匹配的账号</div></div></td></tr>');
+      setHTML(tb, '<tr><td colspan="13"><div class="empty"><div class="big">没有匹配的账号</div></div></td></tr>');
     }
     syncAccSel();
     return;
@@ -560,6 +560,7 @@ function renderAccounts(list) {
       cls = 'off';
       tag = s.hold ? '<span class="tag warn">新号待确认</span>' : '<span class="tag warn">已暂停选号</span>';
     }
+    else if (s.daily_quota && s.daily_quota.exceeded) { cls = 'cool'; tag = '<span class="tag warn">已达每日限额</span>'; }
     else if (cool > 0) {
       cls = 'cool';
       const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
@@ -647,6 +648,7 @@ function renderAccounts(list) {
         '<span class="usage-item usage-rate"><b>' + rate + '</b></span>' +
       '</span></td>' +
       '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
+      '<td class="num">' + dailyQuotaCell(s) + '</td>' +
       '<td class="acts"><div class="acts-inner">' + [
         // 无个人成长体系的账号（企业版 / 静态 API Key）不渲染「签到」「任务」：前者
         // 上游 400「企业账号不支持该操作」，后者 403 growth-only；只留「额度」，点它走
@@ -671,6 +673,75 @@ function renderAccounts(list) {
       '</div></td></tr>';
   }).join(''));
   syncAccSel();
+}
+
+// dailyQuotaCell 使用限额账本展示北京时间用量，保留原「今日已用」报表的宿主时区口径。
+function dailyQuotaCell(s) {
+  const q = s.daily_quota;
+  const label = q ? fmtCredit(q.used) + ' / ' + (q.limit > 0 ? fmtCredit(q.limit) : '不限额') : '设置限额';
+  const source = q && q.override != null ? '单独设置' : '继承默认';
+  return '<button class="xs ghost" data-a="daily_quota" data-u="' + esc(s.uid) + '" title="含后台模型任务；北京时间零点恢复；点击修改额度">' + label + '</button>' +
+    (q ? '<div class="hint">' + source + (q.usage_incomplete ? ' · 用量不完整' : '') + '</div>' +
+      (q.exceeded ? '<div class="hint">北京时间零点恢复</div>' : '') : '');
+}
+
+let dailyQuotaUID = '';
+
+// openDailyQuota 根据账号回显区分继承、显式不限额与自定义，避免把 null 当作零额度。
+function openDailyQuota(uid) {
+  if ($('btnDailyQuotaSave').disabled) return;
+  const account = accLast.find(s => s.uid === uid);
+  if (!account) return;
+  dailyQuotaUID = uid;
+  const q = account.daily_quota || {};
+  $('dailyQuotaTitle').textContent = (account.nickname || uid.slice(0, 16)) + ' · 每日限额';
+  $('dailyQuotaMode').value = q.override == null ? 'inherit' : (q.override === 0 ? 'unlimited' : 'custom');
+  $('dailyQuotaLimit').value = q.override == null ? (q.limit || 0) : q.override;
+  $('dailyQuotaLimit').disabled = $('dailyQuotaMode').value !== 'custom';
+  $('dailyQuotaError').hidden = true;
+  $('dailyQuotaVeil').classList.add('on');
+  $('dailyQuotaMode').focus();
+  $('dailyQuotaMode').onchange = () => { $('dailyQuotaLimit').disabled = $('dailyQuotaMode').value !== 'custom'; };
+  $('btnDailyQuotaClose').onclick = closeDailyQuota;
+  $('btnDailyQuotaSave').onclick = saveDailyQuota;
+  $('dailyQuotaVeil').onclick = ev => { if (ev.target === $('dailyQuotaVeil')) closeDailyQuota(); };
+  $('dailyQuotaVeil').onkeydown = ev => { if (ev.key === 'Escape') closeDailyQuota(); };
+}
+
+// closeDailyQuota 保存过程中保留当前目标，防止异步结果关闭另一个账号的编辑窗口。
+function closeDailyQuota() {
+  if ($('btnDailyQuotaSave').disabled) return;
+  $('dailyQuotaVeil').classList.remove('on');
+  dailyQuotaUID = '';
+}
+
+// saveDailyQuota 仅提交当前 UID 的覆盖值；null 清除覆盖，零表示显式不限额。
+async function saveDailyQuota() {
+  const button = $('btnDailyQuotaSave'), error = $('dailyQuotaError');
+  if (button.disabled || !dailyQuotaUID) return;
+  const mode = $('dailyQuotaMode').value;
+  const raw = $('dailyQuotaLimit').value.trim();
+  const limit = mode === 'inherit' ? null : (mode === 'unlimited' ? 0 : Number(raw));
+  if (mode === 'custom' && (!raw || !Number.isFinite(limit) || limit < 0)) {
+    error.textContent = '请输入非负积分额度；0 表示不限额';
+    error.hidden = false;
+    return;
+  }
+  button.disabled = true;
+  error.hidden = true;
+  let saved = false;
+  try {
+    await api('config', { method: 'POST', body: JSON.stringify({ pool: { account_daily_credit_limits: { [dailyQuotaUID]: limit } } }) });
+    saved = true;
+  } catch (e) {
+    error.textContent = e.message;
+    error.hidden = false;
+  } finally { button.disabled = false; }
+  if (saved) {
+    closeDailyQuota();
+    toast('每日限额已保存并生效', 'ok');
+    await loadOverview(true);
+  }
 }
 
 /* proxyCell 账号行的「代理」格：绑定且有效 → 节点名小标签；绑定但节点被**停用**
@@ -907,6 +978,7 @@ $('accBody').addEventListener('click', async ev => {
   const u = b.dataset.u, a = b.dataset.a;
   // 行内「备注」只开本机编辑器，不打后端接口：提前返回，跳过下面的 disable 与 confirm。
   if (a === 'remark') { openRemarks(u); return; }
+  if (a === 'daily_quota') { openDailyQuota(u); return; }
   if (a === 'remove' && !confirm('移除账号将删除池状态与 auths/ 下的凭证文件，且不可恢复。确认移除？')) return;
   if (a === 'disable' && !confirm('禁用后该账号不再参与选号（保号任务默认也跳过），需手动解冻才能恢复。若只是想临时让位、仍要保号，请改用「暂停选号」。确认禁用？')) return;
   b.disabled = true;
@@ -1823,6 +1895,7 @@ const CFG_MAP = {
   breaker_cooldown: ['pool', 'breaker_cooldown'], breaker_cooldown_max: ['pool', 'breaker_cooldown_max'],
   idle_weight_per_hour: ['pool', 'idle_weight_per_hour'], idle_weight_max: ['pool', 'idle_weight_max'],
   reserve_credits: ['pool', 'reserve_credits'],
+  daily_credit_limit: ['pool', 'daily_credit_limit'],
   ttl: ['session_sticky', 'ttl'],
   timeout_seconds: ['upstream', 'timeout_seconds'], header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'], user_agent: ['upstream', 'user_agent'],

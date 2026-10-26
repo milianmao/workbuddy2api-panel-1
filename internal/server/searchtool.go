@@ -292,6 +292,9 @@ func (h *Handler) probeOnce(ctx context.Context, realm, model string, body []byt
 		lastErr = errors.New("上游响应无 choices[0].message")
 	}
 	if lastErr == nil {
+		if limited := h.cfg.Pool.DailyQuotaErrorForRealm(realm, model); limited != nil {
+			return nil, limited
+		}
 		lastErr = fmt.Errorf("没有可用的 %s 账号", realm)
 	}
 	return nil, lastErr

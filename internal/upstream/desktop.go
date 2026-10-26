@@ -503,6 +503,9 @@ func (c *Client) marketExpertList(a *auth.Auth, body map[string]any) ([]MarketEx
 // expert_actual_use 等 JOIN 事件的 requestId 必须是该服务端 id——自造 UUID 不计数
 // （客户端 resolveRealRequestId 同款语义，Sunny row 2113 实证）。
 func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversationID, requestID string, err error) {
+	if err := c.checkAccountQuota(a); err != nil {
+		return "", "", err
+	}
 	// 会话 ID 用官方形态（v4 UUID）。旧实现是 `wb2api-conv-<UnixNano>`——项目缩写 +
 	// 纳秒时间戳直接当 X-Conversation-ID 打给上游，是 issue #51 里最直白的一处自证。
 	conversationID = session.NewConversationID()
@@ -549,7 +552,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	if err != nil {
 		return "", "", err
 	}
-	defer resp.Body.Close()
+	defer func() { resp.Body.Close() }()
 	if os.Getenv("WB2A_DEBUG_CHAT") != "" {
 		fmt.Printf("[dbg] status=%d enc=%q\n", resp.StatusCode, resp.Header.Get("Content-Encoding"))
 	}
@@ -558,6 +561,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 		return "", "", fmt.Errorf("chat http %d: %s", resp.StatusCode, b)
 	}
 	// 从 SSE 流抓第一个 data.id 作为服务端 requestId（读干流避免残留连接）。
+	resp.Body = c.observeModelStream(a.UID, resp.Body)
 	buf := make([]byte, 0, 1<<20)
 	tmp := make([]byte, 8192)
 	searchFrom := 0
@@ -575,7 +579,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 			// 从上次搜索位置继续：SSE 里 `"id":"` 可能先出现在消息 id 等字段，
 			// 若不推进偏移，首个不匹配的 id 会让循环永远重复命中同一位置，
 			// 读满 1MB 后误报"未找到 requestId"。
-			if i := bytes.Index(buf[searchFrom:], []byte(`"id":"`)); i >= 0 {
+			if i := bytes.Index(buf[searchFrom:], []byte(`"id":"`)); requestID == "" && i >= 0 {
 				abs := searchFrom + i
 				rest := buf[abs+6:]
 				if end := bytes.IndexByte(rest, '"'); end > 0 {
@@ -584,7 +588,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 						fmt.Printf("[dbg-id] %q match=%v\n", id, idRegex.MatchString(id))
 					}
 					if idRegex.MatchString(id) {
-						return conversationID, id, nil
+						requestID = id
 					}
 					searchFrom = abs + 1
 				}
@@ -593,6 +597,9 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 		if rerr != nil || len(buf) > 1<<20 {
 			break
 		}
+	}
+	if requestID != "" {
+		return conversationID, requestID, nil
 	}
 	return "", "", fmt.Errorf("SSE 中未找到服务端 requestId")
 }

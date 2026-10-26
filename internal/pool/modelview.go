@@ -20,7 +20,7 @@ type ModelLockRow struct {
 	// Total 该域**参与选号**的账号数（禁用/暂停号不计，与 ModelBlocked 同口径），
 	// 作为「可选 / 总数」的分母。
 	Total int `json:"total"`
-	// Servable 此刻真正能服务该模型的账号数（healthyForModel 且未在途占满）。
+	// Servable 此刻真正能服务该模型的账号数（健康、未在途占满且未达每日限额）。
 	Servable int `json:"servable"`
 	// Locked 因该模型自身冷却被挡的账号数。
 	Locked int `json:"locked"`
@@ -110,7 +110,7 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 			if e.a.Realm() != realm {
 				continue
 			}
-			if e.healthyForModel(now, model) && !p.inFlightFull(e) {
+			if e.healthyForModel(now, model) && !p.inFlightFull(e) && !p.dailyQuotaBlocked(e, now) {
 				row.Servable++
 			}
 		}
