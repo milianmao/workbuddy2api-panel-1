@@ -37,6 +37,11 @@ type Config struct {
 	MaxRotate int    // 单请求最多换号次数，默认 3
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
+	// ExitTagOf 返回账号的**实际出口**标识（"" = 直连组）。
+	// WAF IP 级拦截按出口分组判定（wafip.go）；nil = 全部账号归直连组（旧行为）。
+	// 由 main 注入（proxypool.ExitKey ∘ pool.AccountProxy）：绑定已删/停用节点的
+	// 账号实际走直连，必须与直连账号同组；server 不感知节点本体。
+	ExitTagOf func(uid string) string
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
 	StickyCount func() int
 	// RedisMode 观测字段（"upstash" / "noop"），供 /status 透出。
@@ -160,9 +165,11 @@ type Handler struct {
 	cfg     Config
 	mux     *http.ServeMux
 	degrade degradeGate
-	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
-	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
-	wafIP       wafIPGate
+	// wafIP WAF IP 级拦截状态机 → 已改为按出口分组的 wafIPGates（wafip.go）：
+	// 多出口（账号级代理池）后每个出口 IP 独立判定/激活，互不连坐。
+	// wafMu 保护懒创建的分组表；gate 本体自带锁。
+	wafMu       sync.Mutex
+	wafIPGates  map[string]*wafIPGate
 	taskMu      sync.Mutex
 	taskRunning map[string]bool
 	budget      *dailyBudget
@@ -846,6 +853,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+	// lastWafExit 轮转中最近一次 WAF 403 的出口分组（末端文案判定用：只有该出口
+	// 的 gate 激活才回 waf_ip_blocked 措辞；其他出口被拦不影响本请求语义）。
+	lastWafExit := ""
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
 	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
 	var modelBlock pool.ModelBlockStatus
@@ -1365,11 +1375,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
 			fail(acct.UID)
 			// WAF IP 级 fail-fast（优先于 rotateBackoff 退避——IP 级拦截时退避无意义）：
-			// 该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，IP 被拦而非账号）
-			// 则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍打同一出口 IP，
-			// 加重风控。账号级软冷却已在上方 applyErrorPolicy 照常记账。
-			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(acct.UID) {
-				break
+			// 该次 WAF 403 喂入该账号出口分组的 IP 级状态机，若激活（短窗多号命中，
+			// IP 被拦而非账号）则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍
+			// 打同一出口 IP，加重风控。账号级软冷却已在上方 applyErrorPolicy 照常记账。
+			// 分组口径：exitKey = 账号的**实际出口**（见 main 的 exitOf）。
+			// exit 只解析一次：喂状态机与末端文案判定复用同一 gate。
+			if kind == upstream.ErrWafBlock {
+				exit, gate := h.wafGateOfUID(acct.UID)
+				lastWafExit = exit
+				if gate.noteWaf(acct.UID) {
+					break
+				}
 			}
 			if !rotateBackoff(i, r.Context()) {
 				break // ctx 取消：终止轮转（分类错误换号退避）
@@ -1630,7 +1646,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status, quota = http.StatusTooManyRequests, true
 			msg = hardCreditMessage
 		case upstream.ErrWafBlock:
-			if h.wafIP.active() {
+			if h.wafGateActive(lastWafExit) {
 				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
 				// 轮转已止损、窗口过后自动解除。客户端提前重试无意义（换号不换 IP）；
 				// 有上游原文时原文优先（下方统一）。

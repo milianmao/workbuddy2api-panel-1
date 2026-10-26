@@ -115,14 +115,29 @@ function setHTML(el, html) {
   lastHTML.set(el, html);
   el.innerHTML = html;
 }
-function ago(iso) {
-  if (!iso || iso.startsWith('0001-')) return '—';
-  const s = (Date.now() - new Date(iso)) / 1000;
+
+/* relFromMs 毫秒时间戳 → 相对时间（ago / agoUnix 共用；非有限值一律 —）。 */
+function relFromMs(ms) {
+  if (!isFinite(ms)) return '—';
+  const s = (Date.now() - ms) / 1000;
   if (s < 0) return '刚刚';
   if (s < 60) return Math.floor(s) + ' 秒前';
   if (s < 3600) return Math.floor(s / 60) + ' 分钟前';
   if (s < 86400) return Math.floor(s / 3600) + ' 小时前';
   return Math.floor(s / 86400) + ' 天前';
+}
+/* ago ISO 字符串 → 相对时间（pool 的 last_success 等 time.Time 字段）。
+   注意：代理池的 checked_at / last_sync_at 是 **unix 秒**，必须走 agoUnix ——
+   传进这里会在 iso.startsWith 上抛 TypeError，把整张表带崩。 */
+function ago(iso) {
+  if (!iso || (typeof iso === 'string' && iso.startsWith('0001-'))) return '—';
+  return relFromMs(new Date(iso).getTime());
+}
+/* agoUnix unix 秒 → 相对时间（0 / 缺失 = 从未发生 → —）。 */
+function agoUnix(sec) {
+  const n = Number(sec);
+  if (!n || !isFinite(n)) return '—';
+  return relFromMs(n * 1000);
 }
 function dur(sec) {
   sec = Math.max(0, Math.round(sec));
@@ -449,7 +464,7 @@ $('btnLogout').onclick = () => {
 };
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', balhist: '余额趋势', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', proxies: '代理池', usage: '用量', packages: '积分构成', balhist: '余额趋势', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   navSet(false);
   view = v;
@@ -465,6 +480,7 @@ function go(v) {
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   if (v === 'balhist') loadBalance();
+  if (v === 'proxies') loadProxies();
   // 补偿状态按需拉取：compData 为空才打上游（失败留空 → 下次进入重试）。
   if (v === 'taskscenter') { reattachQueueView(); if (!compData) loadCompensation(); }
 }
@@ -491,8 +507,7 @@ function renderAccounts(list) {
   accLast = rows;
   const tb = $('accBody');
   if (!rows.length) {
-    setHTML(tb, '<tr><td colspan="10"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');
-    syncAccSel();
+    setHTML(tb, '<tr><td colspan="11"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');    syncAccSel();
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
@@ -571,6 +586,7 @@ function renderAccounts(list) {
       '<td class="pick"><input type="checkbox" class="pk" data-u="' + esc(s.uid) + '"' + (accSel.has(s.uid) ? ' checked' : '') + ' aria-label="选择该账号"></td>' +
       '<td class="who"><div class="nm">' + remarkName(s.uid, s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + (s.api_key ? ' <span class="realm-tag">API Key</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
+      '<td>' + proxyCell(s) + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +
@@ -593,6 +609,7 @@ function renderAccounts(list) {
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>',
         (personal ?
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>' : ''),
+        '<button class="xs ghost" data-a="proxy" data-u="' + esc(s.uid) + '" title="为该账号绑定出口代理（多个账号可共用同一节点）">代理</button>',
         (frozen ? '<button class="xs ghost" data-a="probe_ban" data-u="' + esc(s.uid) + '" title="只读探测上游是否已解封：不 revive、不参与选号、不改任何状态">探活</button>' : ''),
         (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
                 : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '"' + (s.hold ? ' title="新号默认暂停选号：确认可用后点此进选号池"' : '') + '>恢复选号</button>'
@@ -603,6 +620,20 @@ function renderAccounts(list) {
       '</div></td></tr>';
   }).join(''));
   syncAccSel();
+}
+
+/* proxyCell 账号行的「代理」格：绑定且有效 → 节点名小标签；绑定但节点被**停用**
+   （proxy_ok=false）→ 警示色 + 「已停用」，title 说明处置办法；未绑定 → 灰字「直连」。
+   注意「已删除」不会走到这里：删节点时后端经回调解绑，账号回落直连（proxy_tag 为空）。
+   数据来自 overview 的 proxy_id / proxy_tag / proxy_ok；旧数据缺字段时一律按直连显示。 */
+function proxyCell(s) {
+  if (!s || !s.proxy_tag) return '<span class="proxy-direct">直连</span>';
+  const bad = s.proxy_ok === false;
+  const tip = bad
+    ? '绑定的节点已停用，当前实际直连；请重新绑定，或到「代理池」重新启用该节点'
+    : '当前出口代理：' + s.proxy_tag;
+  return '<span class="proxy-tag' + (bad ? ' bad' : '') + '" title="' + esc(tip) + '">' +
+    esc(s.proxy_tag) + (bad ? ' 已停用' : '') + '</span>';
 }
 
 /* 账号池「多选 + 排序」的模块状态。
@@ -863,6 +894,9 @@ $('accBody').addEventListener('click', async ev => {
       toast('已恢复选号', 'ok');
     } else if (a === 'tasks') {
       openTasks(u);
+    } else if (a === 'proxy') {
+      // 单号绑定入口：只带这一个 uid 打开绑定弹窗（批量走工具条「绑定代理」）。
+      openProxyBind([u]);
     } else if (a === 'remove') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
       toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');
@@ -929,6 +963,12 @@ async function batchPauseResume(action) {
 }
 $('btnPauseSel').onclick = () => batchPauseResume('pause');
 $('btnResumeSel').onclick = () => batchPauseResume('resume');
+/* 绑定代理：与暂停/恢复同款「先勾选再操作」心智。勾选后打开绑定弹窗，把整组勾选
+   uid 交给 openProxyBind 统一处理（多号共用同一出口节点正是这里的用途）。 */
+$('btnBindProxy').onclick = () => {
+  if (!accSel.size) { toast('先在表头勾选账号（或点全选）', ''); return; }
+  openProxyBind(Array.from(accSel));
+};
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
 /* 实测上限标注：scripts/probe_max_tokens.py --panel-out 写入探测结果，
@@ -2022,6 +2062,7 @@ function refreshVisible() {
   if (view === 'accounts') {
     loadOverview(true);
   }
+  else if (view === 'proxies') loadProxies(true);
   else if (view === 'logs') loadLogs();
   else if (view === 'taskscenter') {
     reattachQueueView();
@@ -4952,3 +4993,431 @@ function fmtTokens(n) {
   if (n >= 1e4) return (n / 1e4).toFixed(1) + ' 万';
   return String(n);
 }
+
+/* ── 代理池 ─────────────────────────────────────────────────────────
+   节点两种入口：机场订阅（POST /panel/api/subscriptions）与手动粘贴
+   （POST /panel/api/proxies）。账号在账号池页把 uid 绑到节点（bind_proxy），
+   多号可共用同一出口 IP；节点被删/停用后 overview 的 proxy_ok 会变 false。
+   proxyui_test.go 从「代理池模块状态」锚点切到文件尾做 vm 单测。 */
+
+/* 代理池模块状态（proxyui_test.go 的切片锚点，删改前先看该测试）。 */
+let proxyData = [];       // 最近一次 GET /panel/api/proxies 的节点列表（绑定弹窗复用）
+let proxySubData = [];    // 同一响应里的订阅列表
+let proxySel = new Set(); // 已勾选的节点 id（照 accSel 模式）
+let proxyLast = [];       // 最近一次渲染用的节点数组（全选 / 批量操作的范围）
+let bindTargets = [];     // 绑定弹窗待处理的 uid 列表（单号 1 个、批量 N 个）
+
+/* subNameOf 订阅 id → 名称；无 sub_id（手动添加）或订阅已不在列表时回落。 */
+function subNameOf(id) {
+  if (!id) return '手动';
+  const s = (proxySubData || []).find(x => x && x.id === id);
+  return s && s.name ? s.name : String(id);
+}
+
+/* proxyLatencyHtml 延迟格：>0 显示 ms；失败次数 accompanies 上次延迟（后端只在
+   成功测速时刷新 latency_ms，失败累计在 fails）；从未测过 → —。title 带检测时间。 */
+function proxyLatencyHtml(p) {
+  const ms = Number(p && p.latency_ms || 0);
+  const fails = Number(p && p.fails || 0);
+  const tip = p && p.checked_at ? '最近检测：' + agoUnix(p.checked_at) : '尚未测速';
+  if (ms <= 0 && fails <= 0) return '<span style="color:var(--ink-3)" title="' + esc(tip) + '">—</span>';
+  const parts = [];
+  if (ms > 0) parts.push(ms + ' ms');
+  if (fails > 0) parts.push('<span class="src-off">失败 ' + fails + ' 次</span>');
+  return '<span title="' + esc(tip) + '">' + parts.join(' · ') + '</span>';
+}
+
+function renderSubs(subs) {
+  const rows = Array.isArray(subs) ? subs : [];
+  const tb = $('subBody');
+  if (!tb) return;
+  const note = $('subNote');
+  if (note) note.textContent = rows.length ? rows.length + ' 个订阅' : '';
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="5"><div class="empty"><div class="big">还没有订阅</div>点右上角「添加订阅」，从机场链接批量导入节点</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(su => {
+    const url = String(su.url || '');
+    const shortUrl = url.length > 52 ? url.slice(0, 52) + '…' : url;
+    return '<tr>' +
+      '<td class="who"><div class="nm">' + esc(su.name || '(未命名)') + '</div></td>' +
+      '<td><span class="proxy-url" title="' + esc(url) + '">' + esc(shortUrl || '—') + '</span></td>' +
+      '<td class="num">' + (su.count || 0) + '</td>' +
+      '<td style="color:var(--ink-3)">' + agoUnix(su.last_sync_at) + '</td>' +
+      '<td class="acts"><div class="acts-inner auto">' +
+        '<button class="xs ghost" data-act="sync" data-s="' + esc(su.id) + '" title="重新拉取订阅并更新节点">同步</button>' +
+        '<button class="xs ghost danger" data-act="del" data-s="' + esc(su.id) + '" title="删除订阅并移除其导入的节点">删除</button>' +
+      '</div></td></tr>';
+  }).join('');
+}
+
+function renderProxies(list) {
+  const rows = Array.isArray(list) ? list : [];
+  // 勾选集去幽灵：节点被删/订阅重同步后残留的 id 会让「已选 N」虚高、批量空转。
+  if (proxySel.size) {
+    const alive = new Set(rows.map(p => p.id));
+    Array.from(proxySel).forEach(i => { if (!alive.has(i)) proxySel.delete(i); });
+  }
+  proxyLast = rows;
+  const tb = $('proxyBody');
+  if (!tb) return;
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">还没有节点</div>点右上角「添加订阅」从机场链接导入，或「添加节点」手动粘贴</div></td></tr>';
+    syncProxySel();
+    return;
+  }
+  tb.innerHTML = rows.map(p => {
+    const on = !!p.enabled;
+    return '<tr' + (on ? '' : ' class="off"') + '>' +
+      '<td class="pick"><input type="checkbox" class="pk" data-p="' + esc(p.id) + '"' + (proxySel.has(p.id) ? ' checked' : '') + ' aria-label="选择该节点"></td>' +
+      '<td class="who"><div class="nm">' + esc(p.tag || '(未命名)') + '</div></td>' +
+      '<td>' + esc(p.type || '—') + '</td>' +
+      '<td>' + esc(p.server || '—') + ':' + esc(p.port == null ? '?' : p.port) + '</td>' +
+      '<td>' + esc(subNameOf(p.sub_id)) + '</td>' +
+      '<td class="num">' + (p.accounts || 0) + '</td>' +
+      '<td class="num">' + proxyLatencyHtml(p) + '</td>' +
+      '<td>' + (on ? '<span class="tag ok">启用</span>' : '<span class="tag mute">停用</span>') + '</td>' +
+      '<td class="acts"><div class="acts-inner auto">' +
+        '<button class="xs ghost" data-a="test" data-p="' + esc(p.id) + '" title="对该节点测一次延迟">测试</button>' +
+        '<button class="xs ghost" data-a="toggle" data-p="' + esc(p.id) + '">' + (on ? '停用' : '启用') + '</button>' +
+        '<button class="xs ghost danger" data-a="del" data-p="' + esc(p.id) + '">删除</button>' +
+      '</div></td></tr>';
+  }).join('');
+  syncProxySel();
+}
+
+/* syncProxySel 把「已选 N 个」与全选框（含半选态）刷到节点表头，照 syncAccSel。 */
+function syncProxySel() {
+  const all = $('proxyPickAll');
+  if (all) {
+    all.checked = proxyLast.length > 0 && proxySel.size === proxyLast.length;
+    all.indeterminate = proxySel.size > 0 && proxySel.size < proxyLast.length;
+  }
+  const note = $('proxySelNote');
+  if (note) note.textContent = proxySel.size ? proxySel.size + ' / ' + proxyLast.length + ' 个已选' : '';
+}
+
+async function loadProxies(quiet) {
+  try {
+    const d = await api('proxies');
+    proxyData = d.proxies || [];
+    proxySubData = d.subs || [];
+    renderSubs(proxySubData);
+    renderProxies(proxyData);
+  } catch (e) { if (!quiet) toast(e.message, 'err'); }
+}
+
+/* importResultToast 导入/同步类响应的统一汇总：导入 N / 跳过 M（errors 展示前两条）。 */
+function importResultToast(r, prefix) {
+  const errs = Array.isArray(r && r.errors) ? r.errors : [];
+  let msg = (prefix ? prefix + '：' : '') + '导入 ' + ((r && r.imported) || 0) + ' / 跳过 ' + ((r && r.skipped) || 0);
+  if (errs.length) msg += '，错误 ' + errs.length + ' 条：' + errs.slice(0, 2).join('；') + (errs.length > 2 ? '…' : '');
+  toast(msg, errs.length ? 'err' : 'ok');
+}
+
+/* ── 代理池：订阅卡 ──────────────────────────────────────────────── */
+function openSubAdd() {
+  const n = $('subNameInput'), u = $('subUrlInput'), err = $('subErr');
+  if (n) n.value = '';
+  if (u) u.value = '';
+  if (err) err.hidden = true;
+  if ($('subVeil')) $('subVeil').classList.add('on');
+  if (u) u.focus();
+}
+$('btnSubAdd').onclick = openSubAdd;
+$('btnSubCancel').onclick = () => { if ($('subVeil')) $('subVeil').classList.remove('on'); };
+$('btnSubCreate').onclick = async () => {
+  const url = ($('subUrlInput').value || '').trim();
+  const name = ($('subNameInput').value || '').trim();
+  const err = $('subErr');
+  if (!url) { err.textContent = '请填写订阅链接'; err.hidden = false; return; }
+  err.hidden = true;
+  $('btnSubCreate').disabled = true;
+  try {
+    const r = await api('subscriptions', { method: 'POST', body: JSON.stringify({ name: name, url: url }) });
+    importResultToast(r, '');
+    if ($('subVeil')) $('subVeil').classList.remove('on');
+  } catch (e) { err.textContent = e.message; err.hidden = false; }
+  finally { $('btnSubCreate').disabled = false; loadProxies(true); }
+};
+
+/* ── 代理池：表格事件委托接线 ────────────────────────────────────────
+   用 onclick / onchange 属性赋值（与页面其余控件一致），而不是 addEventListener：
+   TestAppJSPackagesCacheFirst 把「let lastPackages 到文件尾」整段在无 DOM 的 vm 里
+   求值，其 $ 桩返回的假元素只有 textContent/innerHTML，裸 addEventListener 会抛
+   TypeError（属性赋值不受影响）。每张表只挂一个处理器，不需要多监听者。
+
+   proxyBusy 是批量 / 单节点动作的 in-flight 守卫：5s 轮询会用新行重建 tbody，
+   旧按钮的 disabled 随旧节点一起消失，双击仍会把同一动作提交两次，所以委托入口
+   先看这个标志位。 */
+let proxyBusy = false;
+async function proxyBusyRun(fn) {
+  if (proxyBusy) { toast('上一个操作还在进行中，请稍候', ''); return; }
+  proxyBusy = true;
+  try { await fn(); } finally { proxyBusy = false; }
+}
+
+$('subBody').onclick = ev => {
+  const b = ev.target.closest('button[data-act]');
+  if (!b) return;
+  return proxyBusyRun(async () => {
+    const id = b.dataset.s, act = b.dataset.act;
+    if (act === 'del' && !confirm('删除该订阅？其导入的节点会一并移除，已绑定这些节点的账号将自动改回直连。')) return;
+    b.disabled = true;
+    try {
+      if (act === 'sync') {
+        const r = await api('subscriptions/' + encodeURIComponent(id) + '/sync', { method: 'POST' });
+        importResultToast(r, '同步');
+      } else if (act === 'del') {
+        const r = await api('subscriptions/' + encodeURIComponent(id), { method: 'DELETE' });
+        toast('已删除订阅：移除 ' + (r.removed_nodes || 0) + ' 节点 / 解绑 ' + (r.unbound_accounts || 0) + ' 账号', 'ok');
+      }
+    } catch (e) { toast(e.message, 'err'); }
+    finally { b.disabled = false; loadProxies(true); }
+  });
+};
+
+/* ── 代理池：节点表 ──────────────────────────────────────────────── */
+function openProxyAdd() {
+  const ta = $('proxyPaste'), err = $('proxyPasteErr');
+  if (ta) ta.value = '';
+  if (err) err.hidden = true;
+  if ($('proxyAddVeil')) $('proxyAddVeil').classList.add('on');
+  if (ta) ta.focus();
+}
+$('btnProxyAdd').onclick = openProxyAdd;
+$('btnProxyAddCancel').onclick = () => { if ($('proxyAddVeil')) $('proxyAddVeil').classList.remove('on'); };
+$('btnProxyImport').onclick = async () => {
+  const text = ($('proxyPaste').value || '');
+  const err = $('proxyPasteErr');
+  if (!text.trim()) { err.textContent = '请粘贴节点链接或 Clash YAML 节点段'; err.hidden = false; return; }
+  err.hidden = true;
+  $('btnProxyImport').disabled = true;
+  try {
+    const r = await api('proxies', { method: 'POST', body: JSON.stringify({ text: text }) });
+    importResultToast(r, '');
+    if ($('proxyAddVeil')) $('proxyAddVeil').classList.remove('on');
+  } catch (e) { err.textContent = e.message; err.hidden = false; }
+  finally { $('btnProxyImport').disabled = false; loadProxies(true); }
+};
+
+/* 单节点动作：测试（toast 延迟或错误）/ 启停 / 删除（confirm）。
+   测速失败走 throw（api() 在 !r.ok 时抛），所以不再判 r.ok——那是死分支。 */
+$('proxyBody').onclick = ev => {
+  const b = ev.target.closest('button[data-a]');
+  if (!b) return;
+  return proxyBusyRun(async () => {
+    const id = b.dataset.p, a = b.dataset.a;
+    if (a === 'del' && !confirm('删除该节点？已绑定它的账号会自动改回直连。')) return;
+    b.disabled = true;
+    try {
+      if (a === 'test') {
+        const r = await api('proxies/' + encodeURIComponent(id) + '/test', { method: 'POST' });
+        toast('延迟 ' + (r.latency_ms != null ? r.latency_ms : '?') + ' ms', 'ok');
+      } else if (a === 'toggle') {
+        const r = await api('proxies/' + encodeURIComponent(id) + '/toggle', { method: 'POST' });
+        toast(r.enabled ? '已启用' : '已停用', 'ok');
+      } else if (a === 'del') {
+        await api('proxies/' + encodeURIComponent(id), { method: 'DELETE' });
+        toast('已删除', 'ok');
+      }
+    } catch (e) { toast(e.message, 'err'); }
+    finally { b.disabled = false; loadProxies(true); }
+  });
+};
+
+/* 行内勾选只改集合 + 刷表头（照账号池：重绘会打断连续点选）。 */
+$('proxyBody').onchange = ev => {
+  const cb = ev.target.closest('input.pk');
+  if (!cb) return;
+  if (cb.checked) proxySel.add(cb.dataset.p);
+  else proxySel.delete(cb.dataset.p);
+  syncProxySel();
+};
+$('proxyPickAll').onchange = e => {
+  if (e.target.checked) proxyLast.forEach(p => proxySel.add(p.id));
+  else proxySel.clear();
+  renderProxies(proxyLast);
+};
+
+/* 批量测试：一次 POST test_sel（不逐个打），结果 toast 汇总后刷新延迟列。 */
+$('btnProxyTestSel').onclick = () => proxyBusyRun(async () => {
+  if (!proxySel.size) { toast('先在表头勾选节点（或点全选）', ''); return; }
+  const ids = Array.from(proxySel);
+  try {
+    const r = await api('proxies/test_sel', { method: 'POST', body: JSON.stringify({ ids: ids }) });
+    const res = Array.isArray(r.results) ? r.results : [];
+    const okN = res.filter(x => x && x.ok).length;
+    const failN = res.length - okN;
+    toast('批量测试完成：成功 ' + okN + ' / 失败 ' + failN, failN ? 'err' : 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  loadProxies(true);
+});
+
+/* 批量启停：toggle 是翻转语义，只对「当前状态 ≠ 目标状态」的节点出手，
+   否则对已启用的节点再点「批量启用」会把它翻成停用。 */
+async function batchProxyToggle(enabled) {
+  if (!proxySel.size) { toast('先在表头勾选节点（或点全选）', ''); return; }
+  const targets = proxyLast.filter(p => proxySel.has(p.id) && !!p.enabled !== enabled);
+  if (!targets.length) { toast(enabled ? '勾选的节点都已启用' : '勾选的节点都已停用', ''); return; }
+  let ok = 0, fail = 0;
+  for (const p of targets) {
+    try { await api('proxies/' + encodeURIComponent(p.id) + '/toggle', { method: 'POST' }); ok++; }
+    catch (e) { fail++; }
+  }
+  toast((enabled ? '已启用 ' : '已停用 ') + ok + ' 个' + (fail ? '，失败 ' + fail + ' 个' : ''), fail ? 'err' : 'ok');
+  loadProxies(true);
+}
+$('btnProxyEnableSel').onclick = () => proxyBusyRun(() => batchProxyToggle(true));
+$('btnProxyDisableSel').onclick = () => proxyBusyRun(() => batchProxyToggle(false));
+
+$('btnProxyDelSel').onclick = () => proxyBusyRun(async () => {
+  if (!proxySel.size) { toast('先在表头勾选节点（或点全选）', ''); return; }
+  const n = proxySel.size;
+  if (!confirm('删除勾选的 ' + n + ' 个节点？已绑定它们的账号将自动改回直连，且不可恢复。')) return;
+  let ok = 0, fail = 0;
+  for (const id of Array.from(proxySel)) {
+    try { await api('proxies/' + encodeURIComponent(id), { method: 'DELETE' }); ok++; }
+    catch (e) { fail++; }
+  }
+  toast('已删除 ' + ok + ' 个' + (fail ? '，失败 ' + fail + ' 个' : ''), fail ? 'err' : 'ok');
+  loadProxies(true);
+});
+
+/* ── 绑定代理弹窗（账号池页单号 / 批量共用） ────────────────────────── */
+/* accOverviewOf 从最近一次 overview 快照取账号行（未加载 / 不在快照 → null）。 */
+function accOverviewOf(uid) {
+  const list = (typeof overviewData !== 'undefined' && overviewData && overviewData.accounts) || [];
+  return list.find(s => s && s.uid === uid) || null;
+}
+
+/* bindCurrentOf 账号当前绑定的节点 id（overview 的 proxy_id；未绑定 / 快照里没有该号 → ''）。
+   绑定弹窗靠它预选 —— 不预选就等于默认「直连」，在已绑定的账号上点确认会静默解绑。 */
+function bindCurrentOf(uid) {
+  const acc = accOverviewOf(uid);
+  return acc && acc.proxy_id ? String(acc.proxy_id) : '';
+}
+
+/* bindPreselect 弹窗预选：单个目标就预选该账号的节点；多号要求当前绑定完全一致才
+   预选，不一致时返回 mixed=true（不预选 + 弹窗内提示），避免把不同节点的号一键统一。 */
+function bindPreselect(uids) {
+  const ids = (uids || []).map(bindCurrentOf);
+  if (!ids.length) return { id: '', mixed: false };
+  const first = ids[0];
+  if (ids.some(x => x !== first)) return { id: '', mixed: true };
+  return { id: first, mixed: false };
+}
+
+function renderProxyBindList() {
+  const box = $('proxyBindList');
+  if (!box) return;
+  const enabled = (proxyData || []).filter(p => p && p.enabled);
+  const alive = new Set(enabled.map(p => p.id));
+  const pre = bindPreselect(bindTargets);
+  // 预选值只能是「直连」或列表里真实存在的启用节点；绑定的节点已停用（不在列表）时
+  // 回落直连，并用提示说清 —— 此时确认保存就是解绑，用户得知道自己要做什么。
+  const pick = pre.id && alive.has(pre.id) ? pre.id : '';
+  // mixed（多号当前绑定不一致）时**什么都不预选**：连「直连」也不勾 —— 否则用户点
+  // 保存就把这批账号一起解绑了，正是要避免的静默解绑。
+  const none = !!pre.mixed;
+  const rows = ['<label class="pb-row"><input type="radio" name="pbpick" value=""' + (!none && !pick ? ' checked' : '') + '>' +
+    '<span class="pb-tag">直连（不使用代理）</span></label>'];
+  for (const p of enabled) {
+    const ms = Number(p.latency_ms || 0);
+    rows.push('<label class="pb-row"><input type="radio" name="pbpick" value="' + esc(p.id) + '"' +
+      (pick === p.id ? ' checked' : '') + '>' +
+      '<span class="pb-tag">' + esc(p.tag || '(未命名)') + '</span>' +
+      '<span class="pb-meta">' + esc(p.type || '—') + ' · ' + esc(p.server || '—') + ':' + esc(p.port == null ? '?' : p.port) +
+      ' · 已绑定 ' + (p.accounts || 0) + ' 个 · 延迟 ' + (ms > 0 ? ms + ' ms' : '未测') + '</span></label>');
+  }
+  if (pre.mixed) {
+    rows.push('<div class="hint" id="proxyBindHint">所选账号当前代理不一致，已取消预选；请重新选择。</div>');
+  } else if (pre.id && !pick) {
+    rows.push('<div class="hint" id="proxyBindHint">当前绑定的节点不在启用列表里（可能已停用）；保存即改为直连。</div>');
+  }
+  if (!enabled.length) rows.push('<div class="hint">当前没有启用状态的节点 —— 可先到「代理池」添加/启用节点，或选择直连。</div>');
+  box.innerHTML = rows.join('');
+}
+
+/* openProxyBind 打开绑定弹窗：标题随场景（单号显示昵称/备注，批量显示个数），
+   打开时重新拉一次节点列表（契约：数据来自 GET /panel/api/proxies），
+   拉取失败时退回旧缓存渲染并在弹窗内报错（不能只显示「没有启用节点」——那会把
+   网络/鉴权故障伪装成「你没有节点」）。 */
+async function openProxyBind(uids) {
+  bindTargets = (uids || []).slice();
+  const t = $('proxyVeilTitle');
+  if (t) {
+    if (bindTargets.length > 1) {
+      t.textContent = '为 ' + bindTargets.length + ' 个账号绑定代理';
+    } else {
+      const uid = bindTargets[0] || '';
+      const acc = accOverviewOf(uid);
+      const rk = typeof remarkOf === 'function' ? remarkOf(uid) : '';
+      const name = rk || (acc && acc.nickname) || (uid ? uid.slice(0, 16) : '');
+      t.textContent = '为 ' + (name || '该账号') + ' 绑定代理';
+    }
+  }
+  const err = $('proxyBindErr');
+  if (err) { err.hidden = true; err.textContent = ''; }
+  if ($('proxyVeil')) $('proxyVeil').classList.add('on');
+  try {
+    const d = await api('proxies');
+    proxyData = d.proxies || [];
+    proxySubData = d.subs || [];
+    renderProxies(proxyData);
+  } catch (e) {
+    // 旧缓存照旧渲染（仍可选直连、仍可保存），但必须把失败原因摆出来。
+    if (err) {
+      err.textContent = '节点列表拉取失败：' + e.message + '（列表可能不是最新）';
+      err.hidden = false;
+    }
+  }
+  renderProxyBindList();
+}
+
+/* 确认绑定：对每个目标 uid 循环 POST bind_proxy（照 batchPauseResume 的循环模式），
+   proxy_id 为空 = 解绑（直连）。完成后按成功/失败计数 toast 并刷新 overview。
+   bindBusy 挡住重复提交：5s 轮询会重建 tbody，按钮禁用态可能已被新节点顶替，
+   「禁用 + 标志位」双保险才不会把同一批账号绑两遍。 */
+let bindBusy = false;
+$('btnProxyBindSave').onclick = async () => {
+  if (bindBusy) return;
+  if (!bindTargets.length) { toast('没有要绑定的账号', ''); return; }
+  const err = $('proxyBindErr');
+  const sel = document.querySelector('input[name="pbpick"]:checked');
+  // 多号绑定不一致时弹窗不做预选：此时「一个都没选」和「明确选了直连」在 DOM 上
+  // 都是无 checked，但语义完全不同（前者是漏选，后者是要解绑）。直接提交会把
+  // 这批账号**静默解绑**，所以这里要求用户显式点一下。
+  if (!sel) {
+    if (err) { err.textContent = '请先选择一个节点，或选「直连（不使用代理）」再保存'; err.hidden = false; }
+    return;
+  }
+  if (err) err.hidden = true;
+  const pid = String(sel.value || '');
+  const unbindN = bindTargets.filter(u => bindCurrentOf(u)).length;
+  if (!pid && unbindN) {
+    const q = bindTargets.length > 1
+      ? '将为 ' + unbindN + ' 个账号解绑（改走直连）。确认？'
+      : '将为该账号解绑（改走直连）。确认？';
+    if (!confirm(q)) return;
+  }
+  bindBusy = true;
+  let ok = 0, fail = 0;
+  try {
+    for (const uid of bindTargets) {
+      try {
+        await api('accounts/' + encodeURIComponent(uid) + '/bind_proxy', { method: 'POST', body: JSON.stringify({ proxy_id: pid }) });
+        ok++;
+      } catch (e) { fail++; }
+    }
+    toast(pid
+      ? '已为 ' + ok + ' 个账号绑定代理' + (fail ? '，失败 ' + fail + ' 个' : '')
+      : '已为 ' + ok + ' 个账号解绑（直连）' + (fail ? '，失败 ' + fail + ' 个' : ''), fail ? 'err' : 'ok');
+    if ($('proxyVeil')) $('proxyVeil').classList.remove('on');
+  } finally {
+    bindBusy = false;
+  }
+  loadOverview(true);
+};
+$('btnProxyBindCancel').onclick = () => { if ($('proxyVeil')) $('proxyVeil').classList.remove('on'); };

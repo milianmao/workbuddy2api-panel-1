@@ -50,6 +50,11 @@ const (
 	responseHeaderTimeout = 60 * time.Second
 )
 
+// DialTimeout 导出 dialTimeout（出站建连上限的单一事实来源）。供 main 装配
+// 代理池时把同一口径注入 proxypool：节点 transport 整体替换 DialContext 后
+// 底座的 net.Dialer.Timeout 失效，建连上限必须由 proxypool 侧用 ctx 兜住。
+const DialTimeout = dialTimeout
+
 // maxIdleConns / maxIdleConnsPerHost 连接池容量（既有值，一并集中定义）。
 const (
 	maxIdleConns        = 100
@@ -145,6 +150,11 @@ func newTransport() *http.Transport {
 		ResponseHeaderTimeout: responseHeaderTimeout,
 	}
 }
+
+// NewTransport 构造共享出站 Transport 的导出包装（单一事实来源仍是 newTransport）。
+// 供 main 装配代理池：proxypool 以它为底构造 per-proxy transport（替换 DialContext
+// 走节点），连接层加固参数（禁 h2 / TLS 握手超时 / 短 keepalive）原样继承。
+func NewTransport() *http.Transport { return newTransport() }
 
 // closeIdler 实现该接口的 RoundTripper 支持清空空闲连接池（*http.Transport、
 // http2.Transport 等均满足；测试注入的自定义 RoundTripper 可选择性实现）。

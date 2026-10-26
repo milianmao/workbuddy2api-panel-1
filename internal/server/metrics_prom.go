@@ -334,7 +334,7 @@ func (h *Handler) promMetrics(w http.ResponseWriter, r *http.Request) {
 		sticky = h.cfg.StickyCount()
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	_, _ = w.Write([]byte(writePromMetrics(snap, health, sticky, explore, h.wafIP.active())))
+	_, _ = w.Write([]byte(writePromMetrics(snap, health, sticky, explore, h.wafAnyActive())))
 }
 
-func (h *Handler) WAFActive() bool { return h.wafIP.active() }
+func (h *Handler) WAFActive() bool { return h.wafAnyActive() }

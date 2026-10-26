@@ -30,6 +30,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
+	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
 	"github.com/misakano7545/workbuddy2api-panel/internal/scheduler"
 	"github.com/misakano7545/workbuddy2api-panel/internal/updater"
@@ -85,6 +86,10 @@ type Config struct {
 	ProbeFile string
 	// Balance 余额趋势采样记录器（nil = 该视图返回 501）
 	Balance *balance.Recorder
+	// Proxypool 代理池（账号级出站代理；nil = 代理相关接口返回 501，overview 不注入
+	// proxy 字段）。panel 同时持有 pool（绑定关系）与 proxypool（节点本体），在
+	// proxy.go 做视图合并。
+	Proxypool *proxypool.Pool
 	// ModelFallback 模型降级路由表（读 live 快照，支持热更）。nil = 未配置。
 	// 面板据它在限流提示里标注「已路由至 X」—— 否则用户看到「v4.1 限流」
 	// 会以为服务断了，实际请求已被自动改道到等价模型继续服务。
@@ -235,6 +240,18 @@ func (p *Panel) routes() {
 	// (账号 × 模型) 手动开关：运维显式禁用某账号的某模型（永久语义，仅手动解）。
 	// 与上游触发的临时冷却（6004/11102）正交，且手动优先。
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/model_toggle", p.withAuth(p.modelToggle))
+	// 代理池（账号级出站代理）：节点列表/导入/删除/启停/测延迟、订阅增删同步、
+	// 账号绑定。契约见 proxy.go 各 handler 注释（前端按同一契约开发）。
+	p.mux.HandleFunc("GET /panel/api/proxies", p.withAuth(p.proxiesList))
+	p.mux.HandleFunc("POST /panel/api/proxies", p.withAuth(p.proxiesImport))
+	p.mux.HandleFunc("POST /panel/api/proxies/test_sel", p.withAuth(p.proxiesTestSel))
+	p.mux.HandleFunc("DELETE /panel/api/proxies/{id}", p.withAuth(p.proxyDelete))
+	p.mux.HandleFunc("POST /panel/api/proxies/{id}/toggle", p.withAuth(p.proxyToggle))
+	p.mux.HandleFunc("POST /panel/api/proxies/{id}/test", p.withAuth(p.proxyTest))
+	p.mux.HandleFunc("POST /panel/api/subscriptions", p.withAuth(p.subscriptionCreate))
+	p.mux.HandleFunc("POST /panel/api/subscriptions/{id}/sync", p.withAuth(p.subscriptionSync))
+	p.mux.HandleFunc("DELETE /panel/api/subscriptions/{id}", p.withAuth(p.subscriptionDelete))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/bind_proxy", p.withAuth(p.accountBindProxy))
 	// 封禁账号探活：只读探测上游是否已解封，不 revive、不参与选号。
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/probe_ban", p.withAuth(p.accountProbeBan))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
@@ -360,7 +377,8 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"in_flight_full":    inFlightFull,
 		// 模型降级路由表：前端据它标注「⤳ 已路由至 X」（限流的模型若配了等价模型）。
 		"model_fallback": p.modelFallbackSnapshot(),
-		"accounts":       p.cfg.Pool.List(),
+		// 账号池视图 + 代理注入（proxy_id/proxy_tag/proxy_ok，见 proxy.go）。
+		"accounts": p.overviewAccounts(),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久，移植上游
 		// PR #120）：与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),

@@ -133,6 +133,9 @@ type Status struct {
 	// 「授权/session 终态，需人工 revive」，paused 是「运维临时让位」（多号轮换场景），
 	// 账号本身健康，只是暂不接流量。（吸收上游 fd835df）
 	Paused bool `json:"paused,omitempty"`
+	// ProxyID 账号绑定的出站代理节点（proxypool.Node.ID）。"" = 直连。
+	// 只存绑定关系本身；节点名/存活状态由 proxypool 侧解出（避免池反向依赖）。
+	ProxyID string `json:"proxy_id,omitempty"`
 	// Hold 「新增待确认」：该账号是新导入/新登录落池的，来路与健康度都未经验证
 	// （实测新号里有直接返回 403 11140 的封号），故默认暂停选号，且**不被解冻清除**——
 	// 只有人工点「恢复选号」（Resume）才进选号池。与 Paused 同看：hold&&paused=待确认。
@@ -267,7 +270,11 @@ type entry struct {
 	// disabledAt 禁用时刻（零值 = 未禁用）。与 reason 配对：运维需要知道
 	// 「什么时候被禁的」——同样一句 401，是刚刚发生还是挂了一周，处置完全不同。
 	disabledAt time.Time
-	lastUsed   time.Time // 最近被选中时刻（防并发撞号）
+	// proxyID 账号绑定的出站代理节点 ID（proxypool.Node.ID；空 = 直连）。
+	// 运维配置语义：与 modelOff 同类，绑定关系不该被重启抹掉，持久化
+	// （stateAccount.ProxyID）。节点本体与解析在 proxypool，这里只存 id。
+	proxyID  string
+	lastUsed time.Time // 最近被选中时刻（防并发撞号）
 	// usedSeq 单调递增的选中序号：每次被 pick 选中时取 p.pickSeq 自增值。
 	// Windows 等平台 time.Now() 精度有限（~0.5ms），高并发/快速连续选号时多个
 	// 账号 lastUsed 完全相等，基于 wall-clock 的 LRU/防惊群判定失效。
@@ -537,7 +544,10 @@ type stateAccount struct {
 	Paused           bool    `json:"paused,omitempty"`
 	// Hold 新增待确认标记（entry.hold 同源）。持久化：重启后仍须人工确认才进选号池，
 	// 否则一次容器重启就把未确认的新号放上流量。
-	Hold         bool      `json:"hold,omitempty"`
+	Hold bool `json:"hold,omitempty"`
+	// ProxyID 账号绑定的出站代理节点（proxypool.Node.ID；空 = 直连）。持久化：
+	// 绑定关系是运维意图，重启不该丢。老 state.json 无此字段 → 零值直连，零迁移。
+	ProxyID      string    `json:"proxy_id,omitempty"`
 	Reason       string    `json:"reason,omitempty"`
 	DisabledAt   time.Time `json:"disabled_at,omitempty"` // 禁用时刻（持久化：重启后仍能看出禁了多久）
 	Until        time.Time `json:"until,omitempty"`

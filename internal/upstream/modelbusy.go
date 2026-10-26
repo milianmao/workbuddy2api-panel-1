@@ -47,7 +47,7 @@ func (c *Client) ModelBusy(a *auth.Auth, models []string) (map[string]string, er
 		}
 		req.Header.Set("Content-Type", "application/json")
 		c.ChatHeaders(req, a, "", ChatMeta{})
-		data, err := c.doJSON(req)
+		data, err := c.doJSON(a, req)
 		if err != nil {
 			return out, err
 		}

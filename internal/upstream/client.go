@@ -879,6 +879,30 @@ type Client struct {
 	// creditObserver 余额查询观察者（见 CreditObserver / SetCreditObserver）。
 	// atomic：启动期挂载、运行期并发读，不参与任何出站决策。
 	creditObserver atomic.Pointer[CreditObserver]
+
+	// accountTransport 按账号解析出站 transport（账号级代理池接线，main 装配期注入）。
+	// 返回 nil = 该账号直连（回落共享 HTTP/ChatHTTP），此时 cacheKey 无意义。
+	// cacheKey 是**稳定标识**（代理节点 ID，不是 transport 指针）：节点内容变化时
+	// proxypool 侧换新 transport 实例，但节点 ID 不变——按 ID 缓存让条目原地替换，
+	// 不会随每次节点变更堆出一份永不回收的旧 client。
+	// 装配期设定、运行期只读，无锁。
+	// 注意：注入的 transport 只替换拨号层（DialContext 走节点远端），域名解析
+	// 交给节点——不走 SetDNSDialer 的本地解析器。
+	accountTransport func(a *auth.Auth) (tr *http.Transport, cacheKey string)
+
+	// acctClients 按稳定 cacheKey（节点 ID）缓存的双 client（常规 + chat 流式），
+	// 避免每次请求重建 client。条目数 ≤ 节点数（而非节点版本数）；条目只被替换、
+	// 不累积，进程生命周期内无泄漏。旧 transport 的空闲连接由 proxypool 失效时
+	// 关闭（CloseIdleConnections），旧 client 随条目替换被 GC。
+	acctMu      sync.Mutex
+	acctClients map[string]*acctClientPair
+}
+
+// acctClientPair 某出口的双 http.Client（常规 + chat 流式），随 transport 实例一起更新。
+type acctClientPair struct {
+	tr      *http.Transport
+	regular *http.Client
+	chat    *http.Client
 }
 
 // CreditObserver 余额查询观察者：每次**真实查到**余额后回调（uid + 余额绝对值）。
@@ -913,6 +937,67 @@ func (c *Client) chatHTTP() *http.Client {
 		return c.ChatHTTP
 	}
 	return c.HTTP
+}
+
+// SetAccountTransport 注入按账号分流的出站 transport 解析闭包（账号级代理池）。
+// fn 返回 (nil, _) 或 fn/c 未注入时该账号回落共享 client（直连，零行为变化）。
+// 第二个返回值是**稳定键**（代理节点 ID），用作 client 缓存键：同一节点内容变化
+// （transport 换新实例）时条目原地替换，缓存不随版本数增长。
+// 装配期调用（main）；并发请求前完成设定。
+func (c *Client) SetAccountTransport(fn func(a *auth.Auth) (tr *http.Transport, cacheKey string)) {
+	c.accountTransport = fn
+}
+
+// EvictAccountClients 淘汰若干稳定键对应的缓存条目（节点删除/停用时由 main 调用，
+// 让已失效 transport 的 client 及早释放）。返回被淘汰的条目数。
+func (c *Client) EvictAccountClients(keys ...string) int {
+	if len(keys) == 0 {
+		return 0
+	}
+	c.acctMu.Lock()
+	defer c.acctMu.Unlock()
+	n := 0
+	for _, k := range keys {
+		if _, ok := c.acctClients[k]; ok {
+			delete(c.acctClients, k)
+			n++
+		}
+	}
+	return n
+}
+
+// clientFor 解析某账号应使用的 (常规, chat) 双 http.Client：
+//   - 未注入 accountTransport / a 为 nil / 闭包返回 nil → 共享 (c.HTTP, c.chatHTTP())；
+//   - 否则按稳定键缓存双 client；键相同但 transport 换实例 → 原地替换条目。
+//
+// 超时口径与直连路径逐字段对齐（不用硬编码）：常规 client 取 c.HTTP.Timeout
+// （main 按 cfg.Upstream.TimeoutSeconds 覆盖过——clientFor 是请求期懒调用，读到的
+// 必是配置后的值），chat client 取 c.chatHTTP().Timeout（New 构造恒 0，SSE 无总
+// 时长，首字节由 transport 的 ResponseHeaderTimeout 管）。否则配置非默认超时
+// 时，绑代理账号的短 RPC 会绕开配置。
+func (c *Client) clientFor(a *auth.Auth) (regular, chat *http.Client) {
+	if c.accountTransport == nil || a == nil {
+		return c.HTTP, c.chatHTTP()
+	}
+	tr, key := c.accountTransport(a)
+	if tr == nil {
+		return c.HTTP, c.chatHTTP()
+	}
+	c.acctMu.Lock()
+	defer c.acctMu.Unlock()
+	if pair, ok := c.acctClients[key]; ok && pair.tr == tr {
+		return pair.regular, pair.chat
+	}
+	pair := &acctClientPair{
+		tr:      tr,
+		regular: &http.Client{Timeout: c.HTTP.Timeout, Transport: tr},
+		chat:    &http.Client{Timeout: c.chatHTTP().Timeout, Transport: tr},
+	}
+	if c.acctClients == nil {
+		c.acctClients = map[string]*acctClientPair{}
+	}
+	c.acctClients[key] = pair
+	return pair.regular, pair.chat
 }
 
 // defaultGlobalBase 缺省 global base（config 未覆盖、且 auth 文件未写 domain 时的兜底）。
@@ -1088,8 +1173,10 @@ func (c *Client) webBase(a *auth.Auth) string {
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
-func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := c.HTTP.Do(req)
+// a 决定出站 client：账号绑定了代理 → 走该节点的 transport（clientFor），否则共享 client。
+func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error) {
+	client, _ := c.clientFor(a)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1299,7 +1386,7 @@ func (c *Client) doRefresh(a *auth.Auth, rtSnapshot string) *refreshResult {
 	c.RefreshHeaders(req, &hdrSnapshot)
 
 	// 网络 I/O（锁外，30s 上限）。
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(a, req)
 	if err != nil {
 		return &refreshResult{err: err, at: time.Now()}
 	}
@@ -1441,7 +1528,8 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
 		doStart := time.Now()
-		resp, err := c.chatHTTP().Do(req)
+		_, chatClient := c.clientFor(a)
+		resp, err := chatClient.Do(req)
 		if timing != nil {
 			timing.Do += max(time.Since(doStart), time.Nanosecond)
 		}
@@ -1451,7 +1539,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固）：失败连接可能仍
 			// 留在空闲池里，下一个请求会继续捡到它——仅靠 IdleConnTimeout 等过期
 			// 不够，主动清池才断根。
-			roundTripCloseIdle(c.chatHTTP().Transport)
+			roundTripCloseIdle(chatClient.Transport)
 			return nil, 0, nil, err
 		}
 		if resp.StatusCode >= 400 {
@@ -1743,7 +1831,8 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	// AccessToken 加锁快照（见 auth.AccessTokenValue：keepalive 刷新在 a.mu 内改写）。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	client, _ := c.clientFor(a)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -2191,7 +2280,8 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	}
 	req.Header.Set("User-Agent", ua)
 	c.injectCodeBuddyRequest(req)
-	resp, err := c.HTTP.Do(req)
+	client, _ := c.clientFor(a)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

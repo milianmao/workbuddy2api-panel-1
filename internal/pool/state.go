@@ -831,6 +831,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Disabled:             e.disabled,
 		DisabledAt:           disabledAtRFC3339(e),
 		Paused:               e.paused,
+		ProxyID:              e.proxyID,
 		Hold:                 e.hold,
 		SuccessCount:         e.successCount,
 		ErrTotal:             e.errTotal,
