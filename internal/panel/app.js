@@ -5270,7 +5270,9 @@ function renderEventStats(list) {
   const box = $('evStats');
   if (!box) return;
   const rows = list || [];
-  if (!rows.length) { box.hidden = true; box.innerHTML = ''; return; }
+  // 空结果也要走 setHTML，否则 lastHTML 缓存与 DOM 脱钩，切回非空筛选时会被当成
+  // 未变更而跳过重绘，汇总条留在空白状态。
+  if (!rows.length) { box.hidden = true; setHTML(box, ''); return; }
   const okOf = e => !!(e.ok || (e.status >= 200 && e.status < 300));
   let ok = 0, limited = 0, failed = 0, retried = 0;
   const durs = [];

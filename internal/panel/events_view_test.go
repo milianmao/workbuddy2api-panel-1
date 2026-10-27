@@ -41,11 +41,18 @@ const fmtSrc = pickFn('fmtMs') + pickFn('fmtNum');
 function makeCtx(apiImpl) {
   const els = {};
   const el = (k) => (els[k] = els[k] || { textContent: '', value: '', innerHTML: '' });
+  // setHTML 的生产实现带 lastHTML 缓存：同内容跳过重绘。这里必须照抄，
+  // 否则「清空后再渲染同样内容」这类缓存 bug 在测试里永远看不见。
+  const lastHTML = new WeakMap();
   const ctx = {
     rawEventsData: [],
     esc: (x) => String(x == null ? '' : x),
     $: el,
-    setHTML: (node, html) => { node.innerHTML = html; },
+    setHTML: (node, html) => {
+      if (lastHTML.get(node) === html) return;
+      lastHTML.set(node, html);
+      node.innerHTML = html;
+    },
     api: apiImpl,
     renderEventTable: undefined,
   };
@@ -86,6 +93,30 @@ async function run() {
   out.hasFakeKey = /Gra\*+cle@1!/.test(html);
   out.hasUpstreamLie = html.indexOf('上游响应') >= 0;
   out.cacheMiss = html.indexOf('未命中 6') >= 0;
+
+  // 汇总条：筛到无结果再切回来，必须重新画出来。
+  // 回归点：空分支曾经直接 box.innerHTML = ''，绕过 setHTML 的 lastHTML 缓存，
+  // 切回非空筛选时被当成「内容没变」跳过重绘，汇总条永久空白。
+  const d = makeCtx(async () => ({ entries: [
+    { time: '2026-10-26T10:00:00Z', model: 'wb-lite', account: 'a@b.c', status: 200,
+      ok: true, duration_ms: 1000, attempts: 1 },
+    { time: '2026-10-26T10:00:01Z', model: 'wb-lite', account: 'a@b.c', status: 429,
+      ok: false, duration_ms: 800, attempts: 2 }
+  ] }));
+  d.el('eventFilterLimit').value = '100';
+  await d.ctx.load();
+  d.el('eventFilterStatus').value = '';
+  d.ctx.render();
+  out.statsFirst = d.el('evStats').innerHTML;
+  out.statsHiddenFirst = !!d.el('evStats').hidden;
+  // 用模型筛选造「0 条」：status=error 筛不掉 429（429 也算失败），凑不出空集。
+  d.el('eventFilterModel').value = '不存在的模型';
+  d.ctx.render();
+  out.statsHiddenEmpty = !!d.el('evStats').hidden;
+  out.statsEmptyHTML = d.el('evStats').innerHTML;
+  d.el('eventFilterModel').value = '';
+  d.ctx.render();
+  out.statsAgain = d.el('evStats').innerHTML;
   process.stdout.write(JSON.stringify(out));
 }
 run().catch(e => { console.error(e); process.exit(1); });`
@@ -104,14 +135,19 @@ run().catch(e => { console.error(e); process.exit(1); });`
 		t.Fatalf("node failed: %v\n%s", err, out)
 	}
 	var got struct {
-		E501           string  `json:"e501"`
-		Badge501       string  `json:"badge501"`
-		E500           string  `json:"e500"`
-		Rows           int     `json:"rows"`
-		Cells          float64 `json:"cells"`
-		HasFakeKey     bool    `json:"hasFakeKey"`
-		HasUpstreamLie bool    `json:"hasUpstreamLie"`
-		CacheMiss      bool    `json:"cacheMiss"`
+		E501             string  `json:"e501"`
+		Badge501         string  `json:"badge501"`
+		E500             string  `json:"e500"`
+		Rows             int     `json:"rows"`
+		Cells            float64 `json:"cells"`
+		HasFakeKey       bool    `json:"hasFakeKey"`
+		HasUpstreamLie   bool    `json:"hasUpstreamLie"`
+		CacheMiss        bool    `json:"cacheMiss"`
+		StatsFirst       string  `json:"statsFirst"`
+		StatsHiddenFirst bool    `json:"statsHiddenFirst"`
+		StatsHiddenEmpty bool    `json:"statsHiddenEmpty"`
+		StatsEmptyHTML   string  `json:"statsEmptyHTML"`
+		StatsAgain       string  `json:"statsAgain"`
 	}
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("bad json: %v\n%s", err, out)
@@ -141,6 +177,19 @@ run().catch(e => { console.error(e); process.exit(1); });`
 	}
 	if !got.CacheMiss {
 		t.Error("缓存未命中数没有渲染出来")
+	}
+	// 汇总条：50% 成功率（1 成功 / 1 限流），且筛到无结果再切回必须重绘
+	if !strings.Contains(got.StatsFirst, "请求成功率 50.0%") {
+		t.Errorf("汇总条成功率应为 50.0%%，实际: %s", got.StatsFirst)
+	}
+	if got.StatsHiddenFirst {
+		t.Error("有数据时汇总条不该隐藏")
+	}
+	if !got.StatsHiddenEmpty || got.StatsEmptyHTML != "" {
+		t.Errorf("无结果时汇总条应隐藏并清空，hidden=%v html=%q", got.StatsHiddenEmpty, got.StatsEmptyHTML)
+	}
+	if !strings.Contains(got.StatsAgain, "请求成功率 50.0%") {
+		t.Errorf("从无结果筛选切回后汇总条没有重绘（setHTML 缓存失效）: %q", got.StatsAgain)
 	}
 }
 
