@@ -11,19 +11,23 @@ package panel
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/loginsite"
+	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
 const (
@@ -156,14 +160,20 @@ type apiEnvelope struct {
 // doJSON 发一次 JSON 请求并解信封。site 决定头族与 UA（真机形态，见 commonHeaders）；
 // extra 为端点差异头（state 的 x-device-token / 哨兵、account 的 Bearer 等），
 // 在公共头之后覆盖写入，nil 表示只发公共头。
-func doJSON(method, fullURL string, extra map[string]string, body io.Reader, site loginSite) (json.RawMessage, int, error) {
-	req, err := http.NewRequest(method, fullURL, body)
+//
+// client 是本次登录会话的出口（指定代理时由 loginProxyClient 建，nil = 默认登录出口）；
+// ctx 来自 HTTP 请求，调用方取消时同步终止上游请求，不留悬挂连接。
+func doJSON(ctx context.Context, client *http.Client, method, fullURL string, extra map[string]string, body io.Reader, site loginSite) (json.RawMessage, int, error) {
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
 	if err != nil {
 		return nil, 0, err
 	}
 	commonHeaders(req, site)
 	applyHeaders(req, extra)
-	resp, err := loginHTTP.Do(req)
+	if client == nil {
+		client = loginHTTP
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -181,6 +191,31 @@ func doJSON(method, fullURL string, extra map[string]string, body io.Reader, sit
 		return nil, resp.StatusCode, &loginEnvelopeError{Code: env.Code, Msg: env.Msg, Status: resp.StatusCode}
 	}
 	return env.Data, resp.StatusCode, nil
+}
+
+// loginProxyClient 为单次登录会话建立独立出口；非法代理直接拒绝，不回退直连。
+func loginProxyClient(raw string) (*http.Client, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, fmt.Errorf("proxy 必须是有效的代理 URL")
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return nil, fmt.Errorf("proxy 仅支持 http、https、socks5、socks5h")
+	}
+	if u.Hostname() == "" || strings.HasSuffix(u.Host, ":") || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return nil, fmt.Errorf("proxy 必须包含主机且不能包含路径、查询或片段")
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("proxy 端口必须在 1 到 65535 之间")
+		}
+	}
+	tr := upstream.NewTransport()
+	tr.Proxy = http.ProxyURL(u)
+	return &http.Client{Transport: tr, Timeout: loginHTTP.Timeout}, nil
 }
 
 // loginDeviceNonce 官方 ww_device_nonce 的来源（桌面端 Turing 设备指纹 SDK）。
@@ -217,23 +252,47 @@ func loginDeviceToken() string {
 // state 会话记站点，poll 用同一站点取 token/落盘。
 func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	site := siteOrDefault("")
+	var reqBody struct {
+		Realm string `json:"realm"`
+		Site  string `json:"site"`
+		Proxy string `json:"proxy"`
+	}
 	if r.Body != nil {
-		var reqBody struct {
-			Realm string `json:"realm"`
-			Site  string `json:"site"`
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12))
+		if err := dec.Decode(&reqBody); err != nil && err != io.EOF {
+			writeErr(w, http.StatusBadRequest, "请求体必须是有效的 JSON 对象（最多 4 KiB）")
+			return
 		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&reqBody); err == nil {
-			if reqBody.Site != "" {
-				// site 显式优先（官方国际站走 site=intl）。
-				site = siteOrDefault(strings.ToLower(strings.TrimSpace(reqBody.Site)))
-			} else {
-				site = siteForRealm(reqBody.Realm)
-			}
+		if err := dec.Decode(new(any)); err != io.EOF {
+			writeErr(w, http.StatusBadRequest, "请求体只能包含一个 JSON 对象")
+			return
 		}
+	}
+	if reqBody.Site != "" {
+		// site 显式优先（官方国际站走 site=intl），但必须是官方域表里有的站点。
+		if !loginsite.ValidID(reqBody.Site) {
+			writeErr(w, http.StatusBadRequest, "site 仅支持 cn、intl、workbuddy")
+			return
+		}
+		site = siteOrDefault(strings.ToLower(strings.TrimSpace(reqBody.Site)))
+	} else {
+		site = siteForRealm(reqBody.Realm)
+	}
+	// 指定出口：会话内所有上游请求（auth/state、auth/token、login/account）都走它。
+	client := loginHTTP
+	if strings.TrimSpace(reqBody.Proxy) != "" {
+		var err error
+		client, err = loginProxyClient(reqBody.Proxy)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		// 会话之间不共享代理连接；无人继续轮询时也不遗留空闲连接。
+		defer client.CloseIdleConnections()
 	}
 	epState, _, _, _ := loginEndpointsFor(site)
 	// auth/state：真机带 x-device-token（取到才发）+ x-custom-channel-id + 四个 x-no-*。
-	data, status, err := doJSON(http.MethodPost, epState, stateHeaders(site, loginDeviceToken()), bytes.NewReader([]byte("{}")), site)
+	data, status, err := doJSON(r.Context(), client, http.MethodPost, epState, stateHeaders(site, loginDeviceToken()), bytes.NewReader([]byte("{}")), site)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, fmt.Sprintf("auth state (upstream %d): %v", status, err))
 		return
@@ -255,7 +314,11 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 			delete(p.logins, s)
 		}
 	}
-	p.logins[st.State] = loginSession{created: time.Now(), realm: site.Realm, site: site.ID}
+	sess := loginSession{created: time.Now(), realm: site.Realm, site: site.ID}
+	if client != loginHTTP {
+		sess.client = client
+	}
+	p.logins[st.State] = sess
 	p.loginMu.Unlock()
 	log.Printf("panel: 发起 OAuth 添加账号 realm=%s site=%s（state=%s...）", site.Realm, site.ID, st.State[:min(8, len(st.State))])
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State, "realm": site.Realm, "site": site.ID})
@@ -280,19 +343,6 @@ func (p *Panel) logPollOnce(state, msg string) {
 	log.Printf("panel: 登录轮询 state=%s... 上游=%s", state[:min(8, len(state))], msg)
 }
 
-// addLoggedInAccount OAuth 登录成功后把凭证放进池子：热加载 + 「新增待确认」暂停选号。
-// 与 addImportedAccount 同一口径——新号的来路/健康度都还没验证（实测有登录后第一个
-// 请求就返回 403 code=11140 的封号），故落池即暂停，等面板上人工「恢复选号」再放流量；
-// 签到 / 活跃上报 / 保活 / 余额刷新照常跑。返回值表示是否为全新账号。
-func (p *Panel) addLoggedInAccount(a *auth.Auth) bool {
-	isNew := p.cfg.Pool.AuthByUID(a.UID) == nil
-	p.cfg.Pool.Add(a)
-	p.cfg.Pool.Revive(a.UID) // 重新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
-	p.cfg.Pool.Hold(a.UID)   // 但新号不直接进选号池：hold 待确认，解冻也清不掉
-	log.Printf("panel: 新号待确认 uid=%s（已暂停选号，确认可用后点「恢复选号」）", a.UID)
-	return isNew
-}
-
 // loginPoll 轮询登录态。未完成 → {done:false}；完成 → 建凭证、落盘、热加载、签到。
 func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
@@ -302,6 +352,11 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	p.loginMu.Lock()
 	sess, known := p.logins[state]
+	if known && time.Since(sess.created) > loginTTL {
+		// 过期会话不能再拿原代理去请求上游：直接作废，前端按 410 停止轮询。
+		delete(p.logins, state)
+		known = false
+	}
 	if known && sess.processing {
 		p.loginMu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": "正在写入凭据…"})
@@ -330,12 +385,17 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}()
 	pollSite := siteOrDefault(sess.site)
 	_, epToken, epAcct, _ := loginEndpointsFor(pollSite)
+	client := loginHTTP
+	if sess.client != nil {
+		client = sess.client
+		defer client.CloseIdleConnections()
+	}
 
 	// auth/token 是权威登录状态端点。官方码表语义：
 	//   11217（RetryFetchToken）→ 还没登完，继续轮询；
 	//   12005/11212/11216（席位满/许可证过期/试用到期）→ 终态，立刻把上游 msg
 	//   抛给前端并停轮询（官方 SignLicenseError 行为），不再空转到 TTL。
-	tokRaw, _, err := doJSON(http.MethodGet, epToken+state, tokenHeaders(pollSite), nil, pollSite)
+	tokRaw, _, err := doJSON(r.Context(), client, http.MethodGet, epToken+url.QueryEscape(state), tokenHeaders(pollSite), nil, pollSite)
 	if err != nil {
 		var envErr *loginEnvelopeError
 		if errors.As(err, &envErr) && loginCodeFatal(envErr.Code) {
@@ -375,7 +435,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		EnterpriseID string `json:"enterpriseId"`
 		Nickname     string `json:"nickname"`
 	}
-	acctRaw, _, errAcct := doJSON(http.MethodGet, epAcct+state, accountHeaders(pollSite, tok.AccessToken), nil, pollSite)
+	acctRaw, _, errAcct := doJSON(r.Context(), client, http.MethodGet, epAcct+url.QueryEscape(state), accountHeaders(pollSite, tok.AccessToken), nil, pollSite)
 	if errAcct == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	} else {
@@ -442,7 +502,9 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "save auth: "+err.Error())
 		return
 	}
-	isNewAccount := p.addLoggedInAccount(a)
+	isNewAccount := p.cfg.Pool.AuthByUID(acct.UID) == nil
+	p.cfg.Pool.Add(a)
+	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
 
 	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
 	// realm 分支：CN 走 DailyCheckin；global 无 CN 签到体系，改为注册激活 + trial 领取
@@ -450,11 +512,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	checkinMsg := ""
 	remain := int64(-1)
 	total := int64(0)
-	// 上游客户端为空（纯本地 / 单测）时整段跳过：登录本身已完成，账号已落盘入池。
-	up := p.cfg.Upstream
-	if up == nil {
-		// 无上游：不签到、不查余额，登录结果照旧返回。
-	} else if sess.realm == "global" {
+	if sess.realm == "global" {
 		// 注册激活（幂等）：region required 时自动补地区（白名单首个，HK）后重新激活。
 		// 失败不阻断登录结果（auth 已落盘），只在返回字段里体现。
 		if activated, err := p.cfg.Upstream.GlobalCompleteRegistration(a); err != nil {
@@ -479,17 +537,15 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	balanceErr := ""
-	if up != nil {
-		if rm, tt, err := up.UserResource(a); err == nil {
-			remain, total = rm, tt
-			p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
-		} else {
-			// 凭据已落盘但上游仍拒绝 billing（典型：旧会话没清干净 / 渠道降级 token）。
-			// 不判登录失败（chat 可能可用），但必须如实回传，否则运维只会看到「已添加」
-			// 却继续 401，误以为重新登录没用。
-			balanceErr = err.Error()
-			log.Printf("panel: 登录后余额校验失败 uid=%s: %v", acct.UID, err)
-		}
+	if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
+		remain, total = rm, tt
+		p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
+	} else {
+		// 凭据已落盘但上游仍拒绝 billing（典型：旧会话没清干净 / 渠道降级 token）。
+		// 不判登录失败（chat 可能可用），但必须如实回传，否则运维只会看到「已添加」
+		// 却继续 401，误以为重新登录没用。
+		balanceErr = err.Error()
+		log.Printf("panel: 登录后余额校验失败 uid=%s: %v", acct.UID, err)
 	}
 
 	p.loginMu.Lock()

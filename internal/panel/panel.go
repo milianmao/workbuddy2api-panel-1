@@ -197,10 +197,11 @@ type modelsCacheEntry struct {
 	globalSource string
 }
 
-// loginSession 进行中的 OAuth 会话：创建时刻 + realm（cn/global，用于落盘与端点切换）。
+// loginSession 保存 OAuth 会话的站点、出口和并发门闩，保证授权与轮询使用同一出口。
 type loginSession struct {
 	created time.Time
-	realm   string // "cn" / "global"，缺省 cn
+	realm   string       // "cn" / "global"，缺省 cn
+	client  *http.Client // 指定代理时独立持有；nil 沿用默认登录出口
 	// site 登录站点（cn/intl/workbuddy，对齐官方域表）。决定 poll 用哪套端点：
 	// 国际域 codebuddy.ai 与 workbuddy.ai 同后端不同主机，混用会把请求打到非签发域。
 	// 空 = 老会话/未指定，按 cn 处理（siteOrDefault 归一）。

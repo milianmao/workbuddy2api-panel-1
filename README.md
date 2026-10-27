@@ -375,6 +375,23 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 
 > Windows 用户请用方式 A（或 WSL）；`login.sh` 需要 python3。
 
+**外部接口：指定登录类型与代理出口获取授权链接**
+
+`POST /panel/api/login/start` 使用 `Authorization: Bearer <api_key>` 鉴权，与面板共用网关密钥。请求体中的 `site` 是登录类型（`cn` / `intl` / `workbuddy`），`proxy` 是服务端可连接的代理 URL，支持 `http://`、`https://`、`socks5://`、`socks5h://`，可携带用户名密码。
+
+```bash
+curl -X POST 'http://127.0.0.1:7863/panel/api/login/start' \
+  -H 'Authorization: Bearer YOUR_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"site":"intl","proxy":"http://user:password@127.0.0.1:7890"}'
+```
+
+成功返回 `{"ok":true,"url":"https://…","state":"…","realm":"global","site":"intl"}`，`url` 即授权链接。省略 `site` 默认国内站；省略或清空 `proxy` 沿用原登录出口。非法 JSON、未知站点或非法代理 URL 返回 `400`，上游请求或代理连接失败返回 `502`，指定代理失败时不会回退直连。对外开放前应配置非空 `api_key`（空密钥沿用项目原有的不鉴权行为）。
+
+调用方打开 `url` 完成人工授权后，每 3 秒携带相同 Bearer 密钥调用 `GET /panel/api/login/poll?state=<state>`；服务端使用该会话启动时指定的同一代理查询 token 和账号信息，`done:true` 表示凭证已落盘并入池（新账号仍按原逻辑暂停选号，需人工确认恢复）。`done:false` 继续轮询，`fatal:true` 或 HTTP `410` 停止。会话保存在内存中，有效期 15 分钟，服务重启后须重新发起。
+
+代理只作用于服务端获取授权链接及登录轮询；浏览器访问授权页的出口由调用方自行配置，登录后的账号日常请求仍使用现有账号代理绑定。
+
 **方式 C：静态 API Key（`ck_` / `pt_` 前缀，免登录）**
 
 面板「添加账号」→ 切到「**API Key**」标签，粘贴 CodeBuddy 平台签发的静态 Key（`ck_...` / `pt_...`）。网关先用**企业口径**额度端点探测该 Key（无效即拒绝、不落盘），成功后落盘并热加载进池，可填昵称与自定义 uid（缺省由 Key 的 id 段派生为 `apikey-<id>`）。
