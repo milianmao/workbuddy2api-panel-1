@@ -701,38 +701,44 @@ func identitySentenceRule(t *testing.T) [2]string {
 
 // 作用域：identity 路径整句改写，全局路径（brand=false）原样透传 ——
 // 后者是 sanitize_brand_scope=identity 时用户消息不被改动的前提。
+//
+// 断言只钉「原文案不再出站」，不钉替换成哪句：上游 2026-10-27 起用
+// sanitizeIdentitySentenceRe 统一把这类身份句收敛为中性句（You are a helpful
+// AI assistant.），本仓表项退化为预检指纹，替换文案归上游所有。
 func TestIdentitySentenceRespectsBrandScope(t *testing.T) {
 	rw := identitySentenceRule(t)
 	in := rw[0] + "."
-	want := rw[1] + "."
-	if got := sanitizeTextIdentity(in); got != want {
-		t.Errorf("identity 作用域应整句改写：want %q, got %q", want, got)
+	got := sanitizeTextIdentity(in)
+	if got == in || strings.Contains(got, rw[0]) {
+		t.Errorf("identity 作用域应整句改写：in %q, got %q", in, got)
 	}
-	if got := sanitizeText(in); got != in {
-		t.Errorf("全局作用域不得改整句：%q -> %q", in, got)
+	if g := sanitizeText(in); g != in {
+		t.Errorf("全局作用域不得改整句：%q -> %q", in, g)
 	}
 }
 
-// 匹配串不带结尾标点：句号 / 逗号接后继 / 换行 / 直接结尾四种形态一并覆盖，
-// 且原有标点与后继内容原样保留。
+// 四种句尾形态都要让原文案不再出站：句号 / 句号+后继 / 逗号+后继 / 换行 / 直接结尾。
+//
+// 命中路径有两条，都会达成这个结果：句号收尾时上游 sanitizeIdentitySentenceRe
+// 先把它收敛成中性句（You are a helpful AI assistant.）；没有句号时本仓表项
+// 的整串替换兜底（You are CodeBuddy Code）。因此断言只钉「原文案不再出现」
+// 与句号之后另起的后继句子不被吞掉，不钉替换成哪一句；逗号接后继同属一句，上游会一并收敛。
 func TestIdentitySentencePunctuationVariants(t *testing.T) {
 	rw := identitySentenceRule(t)
-	for _, c := range []struct{ name, suffix string }{
-		{"period", "."},
-		{"comma", ", running inside a panel."},
-		{"newline", "\nnext line"},
-		{"bare", ""},
+	for _, c := range []struct{ name, suffix, keep string }{
+		{"period", ".", ""},
+		{"period-then-text", ". Use the read tool", "Use the read tool"},
+		{"comma", ", running inside a panel.", ""},
+		{"newline", "\nnext line", "next line"},
+		{"bare", "", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			out := sanitizeTextIdentity(rw[0] + c.suffix)
-			if !strings.HasPrefix(out, rw[1]) {
-				t.Fatalf("want prefix %q, got %q", rw[1], out)
+			if strings.Contains(out, rw[0]) {
+				t.Errorf("原文案仍在输出里：%q", out)
 			}
-			if rest := strings.TrimPrefix(out, rw[1]); rest != c.suffix {
-				t.Errorf("后继内容/标点被改动：suffix %q -> %q", c.suffix, rest)
-			}
-			if strings.HasPrefix(out, rw[0]) {
-				t.Errorf("原文案仍出现在输出开头：%q", out)
+			if c.keep != "" && !strings.Contains(out, c.keep) {
+				t.Errorf("后继内容被吞：want 含 %q, got %q", c.keep, out)
 			}
 		})
 	}
@@ -756,10 +762,10 @@ func TestPrepareBodySanitizesIdentitySentence(t *testing.T) {
 	rw := identitySentenceRule(t)
 	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"system","content":"` + rw[0] + `."}]}`)
 	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", nil, "", "", false)
-	if !strings.Contains(string(out), rw[1]) {
-		t.Errorf("system 整句未随请求体改写：%s", out)
-	}
 	if strings.Contains(string(out), rw[0]) {
 		t.Errorf("system 原文案仍出站：%s", out)
+	}
+	if !strings.Contains(string(out), "You are ") {
+		t.Errorf("system 整句被删而不是改写：%s", out)
 	}
 }
