@@ -318,6 +318,6 @@ func (c *Client) ReportChatActivityModel(a *auth.Auth, conversationID, requestID
 	}
 	req.Header.Set("X-Domain", c.chatHost(a))
 	// 设备风控头：真机 /v2/report 不带 X-Device-Token（只有 billing 族带），故不注入。
-	_, err = c.doJSON(req)
+	_, err = c.doJSON(a, req)
 	return err
 }
