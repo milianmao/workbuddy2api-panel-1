@@ -5662,6 +5662,57 @@ function bindPreselect(uids) {
   return { id: first, mixed: false };
 }
 
+/* 绑定弹窗的视图状态（过滤词 / 排序 / 正在测速的 id）。放模块级而不是读 DOM：
+   测速是逐节点回写的，每测完一轮都要重绘列表，状态若只在 DOM 里会被重绘冲掉。 */
+let pbFilter = '';
+let pbSort = 'lat';
+const pbTesting = new Set();
+let pbTested = false;
+
+/* pbHay 过滤用的检索串：名称/服务器/类型/端口/订阅，全小写。 */
+function pbHay(p) {
+  return [p.tag, p.server, p.type, p.port, p.sub_id]
+    .map(x => String(x == null ? '' : x)).join(' ').toLowerCase();
+}
+
+/* 延迟分档：≤300ms 绿、≤800ms 黄、更慢红、0（未测或刚失败）灰。
+   阈值取的是「点开面板点两下能感知」的量级，不是精确 SLA。 */
+function pbLatClass(ms) {
+  if (!(ms > 0)) return 'none';
+  if (ms <= 300) return 'fast';
+  if (ms <= 800) return 'mid';
+  return 'slow';
+}
+
+function pbLatTitle(p, ms) {
+  if (!(ms > 0)) return '还没有有效测速记录（失败 ' + (p.fails || 0) + ' 次），点「测速」现测';
+  const when = typeof agoUnix === 'function' ? agoUnix(p.checked_at) : '';
+  return '最近一次测速' + (when ? '：' + when : '') + '，点「测速」可重测';
+}
+
+/* pbCompare 排序：默认延迟优先（有延迟的升序 → 未测/失败垫底 → 失败少者优先 → 名称）。
+   未测的排最后是因为「0ms」不是「最快的节点」，排前面会误导人直接选它。 */
+function pbCompare(a, b) {
+  const la = Number(a.latency_ms || 0), lb = Number(b.latency_ms || 0);
+  const fa = Number(a.fails || 0), fb = Number(b.fails || 0);
+  if (pbSort === 'name') return String(a.tag || '').localeCompare(String(b.tag || ''));
+  if (pbSort === 'acc') return Number(b.accounts || 0) - Number(a.accounts || 0);
+  if (pbSort === 'fails' && fa !== fb) return fb - fa;
+  const ha = la > 0 ? 0 : 1, hb = lb > 0 ? 0 : 1;
+  if (ha !== hb) return ha - hb;
+  if (ha === 0 && la !== lb) return la - lb;
+  if (fa !== fb) return fa - fb;
+  return String(a.tag || '').localeCompare(String(b.tag || ''));
+}
+
+/* pbView 当前过滤+排序后要显示的启用节点。 */
+function pbView() {
+  const q = String(pbFilter || '').trim().toLowerCase();
+  return (proxyData || [])
+    .filter(p => p && p.enabled && (!q || pbHay(p).includes(q)))
+    .sort(pbCompare);
+}
+
 function renderProxyBindList() {
   const box = $('proxyBindList');
   if (!box) return;
@@ -5674,24 +5725,100 @@ function renderProxyBindList() {
   // mixed（多号当前绑定不一致）时**什么都不预选**：连「直连」也不勾 —— 否则用户点
   // 保存就把这批账号一起解绑了，正是要避免的静默解绑。
   const none = !!pre.mixed;
-  const rows = ['<label class="pb-row"><input type="radio" name="pbpick" value=""' + (!none && !pick ? ' checked' : '') + '>' +
-    '<span class="pb-tag">直连（不使用代理）</span></label>'];
-  for (const p of enabled) {
+  const view = pbView();
+  const rows = ['<label class="pb-row dir"><input type="radio" name="pbpick" value=""' + (!none && !pick ? ' checked' : '') + '>' +
+    '<span class="pb-name"><span class="pb-tag">直连（不使用代理）</span>' +
+    '<span class="pb-sub">不经过任何节点，直接用本机出口</span></span></label>'];
+  for (const p of view) {
     const ms = Number(p.latency_ms || 0);
-    rows.push('<label class="pb-row"><input type="radio" name="pbpick" value="' + esc(p.id) + '"' +
-      (pick === p.id ? ' checked' : '') + '>' +
-      '<span class="pb-tag">' + esc(p.tag || '(未命名)') + '</span>' +
-      '<span class="pb-meta">' + esc(p.type || '—') + ' · ' + esc(p.server || '—') + ':' + esc(p.port == null ? '?' : p.port) +
-      ' · 已绑定 ' + (p.accounts || 0) + ' 个 · 延迟 ' + (ms > 0 ? ms + ' ms' : '未测') + '</span></label>');
+    const fails = Number(p.fails || 0);
+    const busy = pbTesting.has(p.id);
+    const on = pick === p.id;
+    rows.push('<label class="pb-row' + (on ? ' on' : '') + '">' +
+      '<input type="radio" name="pbpick" value="' + esc(p.id) + '"' + (on ? ' checked' : '') + '>' +
+      '<span class="pb-name"><span class="pb-tag">' + esc(p.tag || '(未命名)') +
+        (on ? '<span class="pb-cur">当前</span>' : '') + '</span>' +
+      '<span class="pb-sub">' + esc(p.type || '—') + ' · ' + esc(p.server || '—') + ':' + esc(p.port == null ? '?' : p.port) +
+        ' · 已绑定 ' + (p.accounts || 0) + ' 个</span></span>' +
+      '<span class="pb-lat ' + pbLatClass(ms) + '" title="' + esc(pbLatTitle(p, ms)) + '">' +
+        (ms > 0 ? ms + ' ms' : '未测') + '</span>' +
+      '<span class="pb-fails' + (fails ? '' : ' none') + '">' + (fails ? '失败 ' + fails : '') + '</span>' +
+      '<button type="button" class="xs pb-test" data-test="' + esc(p.id) + '"' + (busy ? ' disabled' : '') + '>' +
+        (busy ? '测速中' : '测速') + '</button></label>');
+  }
+  if (!enabled.length) {
+    rows.push('<div class="hint">当前没有启用状态的节点 —— 可先到「代理池」添加/启用节点，或选择直连。</div>');
+  } else if (!view.length) {
+    rows.push('<div class="pb-empty">没有匹配「' + esc(String(pbFilter || '')) + '」的节点；清空过滤词可看全部 ' + enabled.length + ' 个。</div>');
   }
   if (pre.mixed) {
     rows.push('<div class="hint" id="proxyBindHint">所选账号当前代理不一致，已取消预选；请重新选择。</div>');
   } else if (pre.id && !pick) {
     rows.push('<div class="hint" id="proxyBindHint">当前绑定的节点不在启用列表里（可能已停用）；保存即改为直连。</div>');
   }
-  if (!enabled.length) rows.push('<div class="hint">当前没有启用状态的节点 —— 可先到「代理池」添加/启用节点，或选择直连。</div>');
   box.innerHTML = rows.join('');
+  const cnt = $('pbCount');
+  if (cnt) {
+    const measured = view.filter(p => Number(p.latency_ms || 0) > 0).length;
+    cnt.textContent = '显示 ' + view.length + '/' + enabled.length + ' · 已测 ' + measured +
+      (measured < view.length ? ' · 未测/失败 ' + (view.length - measured) : '');
+  }
 }
+
+/* pbTestNodes 逐节点测速（一次 POST test_sel，服务端并发；前端只回写结果）。
+   测速失败 = latency_ms 清 0 + fails+1（与后端 test.go 的语义一致），不隐藏该节点。 */
+async function pbTestNodes(ids) {
+  const list = (ids || []).filter(Boolean);
+  if (!list.length) { toast('没有需要测速的节点', ''); return; }
+  for (const id of list) pbTesting.add(id);
+  renderProxyBindList();
+  try {
+    const r = await api('proxies/test_sel', { method: 'POST', body: JSON.stringify({ ids: list }) });
+    const res = Array.isArray(r.results) ? r.results : [];
+    let okN = 0;
+    for (const x of res) {
+      if (!x || !x.id) continue;
+      const p = (proxyData || []).find(n => n && n.id === x.id);
+      if (!p) continue;
+      if (x.ok) { p.latency_ms = Number(x.latency_ms || 0); p.fails = 0; okN++; }
+      else { p.latency_ms = 0; p.fails = Number(p.fails || 0) + 1; }
+      p.checked_at = Math.floor(Date.now() / 1000);
+    }
+    const failN = Math.max(0, res.length - okN);
+    toast('测速完成：成功 ' + okN + (failN ? ' · 失败 ' + failN : ''), failN && !okN ? 'err' : 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    for (const id of list) pbTesting.delete(id);
+    pbTested = true;
+    renderProxyBindList();
+  }
+}
+
+$('proxyBindList').onclick = ev => {
+  const b = ev.target && ev.target.closest ? ev.target.closest('button[data-test]') : null;
+  if (!b) return null;
+  // 行是 <label>：不拦住默认行为的话，点「测速」会顺带把单选框选中。
+  if (ev.preventDefault) ev.preventDefault();
+  if (ev.stopPropagation) ev.stopPropagation();
+  return pbTestNodes([b.dataset.test]);
+};
+
+$('pbFilter').oninput = ev => {
+  pbFilter = (ev.target && ev.target.value) || '';
+  renderProxyBindList();
+};
+
+$('pbSort').onchange = ev => {
+  pbSort = (ev.target && ev.target.value) || 'lat';
+  renderProxyBindList();
+};
+
+$('pbTestAll').onclick = () => {
+  const need = pbView().filter(p => !(Number(p.latency_ms || 0) > 0) || Number(p.fails || 0) > 0);
+  if (!need.length) { toast('当前列表的节点都已经有延迟了', ''); return; }
+  return pbTestNodes(need.map(p => p.id));
+};
 
 /* openProxyBind 打开绑定弹窗：标题随场景（单号显示昵称/备注，批量显示个数），
    打开时重新拉一次节点列表（契约：数据来自 GET /panel/api/proxies），

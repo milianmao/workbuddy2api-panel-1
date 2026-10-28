@@ -754,12 +754,39 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .proxy-tag.bad { color:var(--bad); background:var(--bad-soft); border-color:color-mix(in srgb, var(--bad) 22%, transparent); }
   .proxy-direct { color:var(--ink-3); font-size:11.5px; }
   .proxy-url { display:inline-block; max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; font-family:var(--mono); font-size:12px; }
-  .pb-list { display:flex; flex-direction:column; gap:6px; }
-  .pb-row { display:flex; align-items:center; gap:8px; padding:7px 10px; border:1px solid var(--line-soft); border-radius:8px; font-size:12.5px; color:var(--ink-2); cursor:pointer; }
-  .pb-row:hover { border-color:var(--line); }
-  .pb-row input { accent-color:var(--accent); margin:0; flex:none; }
-  .pb-row .pb-tag { flex:none; font-weight:550; color:var(--ink); }
-  .pb-row .pb-meta { color:var(--ink-3); font-size:11.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  /* 绑定弹窗：工具条 + 定宽网格行。延迟单独占一列 —— 不能再塞进会 ellipsis 的
+     说明行（那样 640px 下「延迟 X ms」永远是第一个被截掉的字段）。 */
+  .pbd .body { padding-top: 12px; }
+  .pb-tools { display:flex; align-items:center; gap:8px; margin-bottom:10px; flex-wrap:wrap; }
+  .pb-tools > input[type=search] { flex:1 1 200px; min-width:130px; }
+  .pb-tools > select { flex:none; }
+  .pb-tools .grow { flex:1; }
+  .pb-count { font-size:11.5px; color:var(--ink-3); font-variant-numeric:tabular-nums; }
+  .pb-list { display:flex; flex-direction:column; gap:5px; }
+  .pb-row { display:grid; grid-template-columns:16px minmax(0,1fr) 78px 54px 58px; align-items:center; gap:10px;
+    padding:7px 10px; border:1px solid var(--line-soft); border-radius:8px; font-size:12.5px; color:var(--ink-2); cursor:pointer; }
+  .pb-row:hover { border-color:var(--line); background:var(--surface-2); }
+  .pb-row.on { border-color:var(--accent); background:var(--accent-soft); }
+  .pb-row.dir { grid-template-columns:16px minmax(0,1fr); }
+  .pb-row input { accent-color:var(--accent); margin:0; }
+  .pb-name { min-width:0; display:flex; flex-direction:column; gap:1px; }
+  .pb-tag { font-weight:560; color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pb-cur { margin-left:6px; padding:0 4px; border-radius:4px; font:500 10px/1.6 var(--sans); color:var(--accent); background:var(--accent-soft); }
+  .pb-sub { color:var(--ink-3); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .pb-lat { text-align:right; font-size:12px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--ink-3); }
+  .pb-lat.fast { color:var(--ok); } .pb-lat.mid { color:var(--warn); } .pb-lat.slow { color:var(--bad); }
+  .pb-lat.none { font-weight:500; color:var(--ink-3); }
+  .pb-fails { text-align:right; font-size:11px; color:var(--bad); font-variant-numeric:tabular-nums; }
+  .pb-fails.none { color:transparent; }
+  .pb-row .pb-test { font-size:11px; padding:2px 6px; justify-self:end; }
+  .pb-empty { padding:14px 10px; text-align:center; color:var(--ink-3); font-size:12.5px; }
+  /* 窄屏（≤760px 时 .dlg 被拉成整宽）收掉测速列，保住「名称 + 延迟」两列的可读性 */
+  @media (max-width: 760px) {
+    .pb-row { grid-template-columns:16px minmax(0,1fr) 68px 46px; }
+    .pb-row .pb-test { display:none; }
+    .pb-row.dir { grid-template-columns:16px minmax(0,1fr); }
+    .pb-tools > select { flex:1 1 100%; }
+  }
 
 .acc td.fl { line-height: 1.35; }
 .acc td.fl .fl-row { display: block; font-variant-numeric: tabular-nums; }
@@ -1991,13 +2018,27 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 </div>
 
 <!-- 为账号绑定代理：单号（行内「代理」按钮）与批量（勾选 + 工具条「绑定代理」）共用 -->
+<!-- 为账号绑定代理：单号（行内「代理」按钮）与批量（勾选 + 工具条「绑定代理」）共用 -->
 <div class="veil" id="proxyVeil">
-  <div class="dlg" style="width:640px">
+  <div class="dlg pbd" style="width:860px">
     <header>
       <h3 id="proxyVeilTitle">绑定代理</h3>
-      <div class="hint">为勾选的账号统一选择出口节点，多个账号可共用同一节点；选「直连」即解除绑定。</div>
+      <div class="hint">为勾选的账号统一选择出口节点，多个账号可共用同一节点；选「直连」即解除绑定。
+        延迟是最近一次测速结果（绿色 &lt;300ms · 黄色 &lt;800ms · 红色更慢），点行尾「测速」可现测。</div>
     </header>
     <div class="body">
+      <div class="pb-tools">
+        <input type="search" id="pbFilter" placeholder="过滤节点：名称 / 服务器 / 类型" autocomplete="off">
+        <select id="pbSort" title="节点排序">
+          <option value="lat">延迟优先</option>
+          <option value="fails">失败次数优先</option>
+          <option value="acc">已绑定多优先</option>
+          <option value="name">名称</option>
+        </select>
+        <span class="pb-count" id="pbCount"></span>
+        <span class="grow"></span>
+        <button class="xs" id="pbTestAll" title="对当前列表里「没延迟」或「失败过」的节点批量测速">测速未测/失败</button>
+      </div>
       <div class="pb-list" id="proxyBindList"></div>
       <div class="state err" id="proxyBindErr" hidden style="margin-top:10px"></div>
     </div>
