@@ -535,13 +535,13 @@ function renderAccounts(list) {
   accLast = rows;
   if (!rows.length) {
     if (!total) {
-      setHTML(tb, '<tr><td colspan="13"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>');
     } else if (accRealmFilter === 'cn') {
-      setHTML(tb, '<tr><td colspan="13"><div class="empty"><div class="big">暂无国内版账号</div>当前账号池内均为国际版账号（共 ' + globalCnt + ' 个）</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">暂无国内版账号</div>当前账号池内均为国际版账号（共 ' + globalCnt + ' 个）</div></td></tr>');
     } else if (accRealmFilter === 'global') {
-      setHTML(tb, '<tr><td colspan="13"><div class="empty"><div class="big">暂无国际版账号</div>当前账号池内均为国内版账号（共 ' + cnCnt + ' 个）</div></td></tr>');
+      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">暂无国际版账号</div>当前账号池内均为国内版账号（共 ' + cnCnt + ' 个）</div></td></tr>');
     } else {
-      setHTML(tb, '<tr><td colspan="13"><div class="empty"><div class="big">没有匹配的账号</div></div></td></tr>');
+      setHTML(tb, '<tr><td colspan="12"><div class="empty"><div class="big">没有匹配的账号</div></div></td></tr>');
     }
     syncAccSel();
     return;

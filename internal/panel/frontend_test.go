@@ -2138,6 +2138,9 @@ const ctx = {
   disabledKind: () => null, disabledAge: () => '',
   // renderAccounts 走上游的 setHTML 增量重绘：该 helper 在切片之外，给等效实现。
   setHTML: (el, html) => { el.innerHTML = html; },
+  // 账号池域分类（国内/国际/全部）与最近一次列表是模块级状态，定义在 renderAccounts
+  // 之前、也就是抽取范围之外；不注入的话 renderAccounts 一进过滤分支就 ReferenceError。
+  accRealmFilter: 'all', lastAccountsList: [],
 };
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) + helperSrc + '\nthis.renderAccounts = renderAccounts;', ctx);

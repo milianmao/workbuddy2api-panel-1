@@ -104,6 +104,9 @@ const ctx = {
   // 切片里还带着 renderModelLocks，它调切片外的 fmtLocalDateTime；不注入的话，
   // 以后谁在这里渲染模型锁就是 ReferenceError，而不是一条能读懂的单测失败。
   fmtLocalDateTime: x => String(x),
+  // 账号池域分类（国内/国际/全部）与最近一次列表是模块级状态，定义在 renderAccounts
+  // 之前、也就是抽取范围之外；不注入的话 renderAccounts 一进过滤分支就 ReferenceError。
+  accRealmFilter: 'all', lastAccountsList: [],
 };
 vm.createContext(ctx);
 // 「今日已用」列用 fmtCredit 格式化（renderAccounts 切片外）：把真实实现一并求值，
