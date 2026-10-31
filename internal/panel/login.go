@@ -343,6 +343,19 @@ func (p *Panel) logPollOnce(state, msg string) {
 	log.Printf("panel: 登录轮询 state=%s... 上游=%s", state[:min(8, len(state))], msg)
 }
 
+// addLoggedInAccount OAuth 登录成功后把凭证放进池子：热加载 + 「新增待确认」暂停选号。
+// 与 addImportedAccount 同一口径——新号的来路/健康度都还没验证（实测有登录后第一个
+// 请求就返回 403 code=11140 的封号），故落池即暂停，等面板上人工「恢复选号」再放流量；
+// 签到 / 活跃上报 / 保活 / 余额刷新照常跑。返回值表示是否为全新账号。
+func (p *Panel) addLoggedInAccount(a *auth.Auth) bool {
+	isNew := p.cfg.Pool.AuthByUID(a.UID) == nil
+	p.cfg.Pool.Add(a)
+	p.cfg.Pool.Revive(a.UID) // 重新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
+	p.cfg.Pool.Hold(a.UID)   // 但新号不直接进选号池：hold 待确认，解冻也清不掉
+	log.Printf("panel: 新号待确认 uid=%s（已暂停选号，确认可用后点「恢复选号」）", a.UID)
+	return isNew
+}
+
 // loginPoll 轮询登录态。未完成 → {done:false}；完成 → 建凭证、落盘、热加载、签到。
 func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
@@ -502,9 +515,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "save auth: "+err.Error())
 		return
 	}
-	isNewAccount := p.cfg.Pool.AuthByUID(acct.UID) == nil
-	p.cfg.Pool.Add(a)
-	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
+	isNewAccount := p.addLoggedInAccount(a)
 
 	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
 	// realm 分支：CN 走 DailyCheckin；global 无 CN 签到体系，改为注册激活 + trial 领取
@@ -512,7 +523,11 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	checkinMsg := ""
 	remain := int64(-1)
 	total := int64(0)
-	if sess.realm == "global" {
+	// 上游客户端为空（纯本地 / 单测）时整段跳过：登录本身已完成，账号已落盘入池。
+	up := p.cfg.Upstream
+	if up == nil {
+		// 无上游：不签到、不查余额，登录结果照旧返回。
+	} else if sess.realm == "global" {
 		// 注册激活（幂等）：region required 时自动补地区（白名单首个，HK）后重新激活。
 		// 失败不阻断登录结果（auth 已落盘），只在返回字段里体现。
 		if activated, err := p.cfg.Upstream.GlobalCompleteRegistration(a); err != nil {
@@ -537,15 +552,17 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	balanceErr := ""
-	if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
-		remain, total = rm, tt
-		p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
-	} else {
-		// 凭据已落盘但上游仍拒绝 billing（典型：旧会话没清干净 / 渠道降级 token）。
-		// 不判登录失败（chat 可能可用），但必须如实回传，否则运维只会看到「已添加」
-		// 却继续 401，误以为重新登录没用。
-		balanceErr = err.Error()
-		log.Printf("panel: 登录后余额校验失败 uid=%s: %v", acct.UID, err)
+	if up != nil {
+		if rm, tt, err := up.UserResource(a); err == nil {
+			remain, total = rm, tt
+			p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
+		} else {
+			// 凭据已落盘但上游仍拒绝 billing（典型：旧会话没清干净 / 渠道降级 token）。
+			// 不判登录失败（chat 可能可用），但必须如实回传，否则运维只会看到「已添加」
+			// 却继续 401，误以为重新登录没用。
+			balanceErr = err.Error()
+			log.Printf("panel: 登录后余额校验失败 uid=%s: %v", acct.UID, err)
+		}
 	}
 
 	p.loginMu.Lock()
