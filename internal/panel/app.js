@@ -5360,18 +5360,19 @@ function renderEventContext(ctx) {
   return '<div class="ev-ctx">' + parts.join('') + '</div>';
 }
 
-// 事件行点击展开/收起该请求的上下文。挂 tbody 一次，重渲染后照样有效。
+// 事件行点击打开上下文弹窗。挂 tbody 一次，重渲染后照样有效。
 if ($('eventTableBody')) $('eventTableBody').onclick = ev => {
   const tr = ev.target.closest('tr[data-ev]');
   if (!tr) return;
-  const next = tr.nextElementSibling;
-  if (next && next.classList.contains('ev-ctx-row')) { next.remove(); return; }
   const e = eventRows[Number(tr.dataset.ev)] || {};
-  const row = document.createElement('tr');
-  row.className = 'ev-ctx-row';
-  row.innerHTML = '<td colspan="13">' + renderEventContext(e.context) + '</td>';
-  tr.after(row);
+  // 标题带上请求身份：弹窗遮住表格后，否则看不出打开的是哪一条。
+  $('evCtxHint').textContent = [e.time ? fmtLocalDateTime(e.time) : '', e.path, e.model].filter(Boolean).join(' · ');
+  setHTML($('evCtxBody'), renderEventContext(e.context));
+  $('evCtxVeil').classList.add('on');
 };
+if ($('btnEvCtxClose')) $('btnEvCtxClose').onclick = () => $('evCtxVeil').classList.remove('on');
+// 点遮罩关闭（与其它弹窗一致：只在点在 veil 自身时关，点内容不关）。
+if ($('evCtxVeil')) $('evCtxVeil').onclick = ev => { if (ev.target === $('evCtxVeil')) $('evCtxVeil').classList.remove('on'); };
 
 function formatEventNum(n) {
   if (!n || n < 0) return '0';
