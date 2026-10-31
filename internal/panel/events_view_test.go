@@ -57,7 +57,7 @@ function makeCtx(apiImpl) {
     renderEventTable: undefined,
   };
   vm.createContext(ctx);
-  vm.runInContext('let rawEventsData = [];\n' + fmtSrc + body +
+  vm.runInContext('let rawEventsData = []; let eventRows = [];\n' + fmtSrc + body +
     '\nthis.populate = populateEventFilterOptions; this.render = renderEventTable;' +
     ' this.load = loadEvents; this.get = () => rawEventsData;', ctx);
   return { ctx, els, el };
@@ -88,7 +88,7 @@ async function run() {
   }] }));
   await c.ctx.load();
   const html = c.el('eventTableBody').innerHTML;
-  out.rows = (html.match(/<tr>/g) || []).length;
+  out.rows = (html.match(/<tr[\s>]/g) || []).length; // 行带 data-ev 属性（上下文展开），不能再钉 <tr>
   out.cells = (html.match(/<td/g) || []).length / (out.rows || 1);
   out.hasFakeKey = /Gra\*+cle@1!/.test(html);
   out.hasUpstreamLie = html.indexOf('上游响应') >= 0;

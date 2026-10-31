@@ -548,6 +548,11 @@ function renderAccounts(list) {
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
   const maxCred = Math.max(1, ...rows.map(s => s.credits || 0));
+  // 「探活」是冻结态专属动作；整表没有冻结账号时连那条缝都不占，否则每一行都在
+  // 「代理」和「选号」之间空出 54px。判定式与行内 frozen（disabled 或仍在冷却）同源。
+  const nowF = Date.now();
+  const anyFrozen = rows.some(s => s.disabled || Math.max(s.cool_remaining_sec || 0,
+    (new Date(s.breaker_until || 0) - nowF) / 1000, (new Date(s.degrade_until || 0) - nowF) / 1000) > 0);
   setHTML(tb, rows.map(s => {
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
@@ -651,11 +656,12 @@ function renderAccounts(list) {
       '</span></td>' +
       '<td class="num lastok" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
       '<td class="num dq">' + dailyQuotaCell(s) + '</td>' +
-      '<td class="acts"><div class="acts-inner">' + [
+      '<td class="acts"><div class="acts-inner' + (anyFrozen ? ' with-probe' : '') + '">' + [
         // 无个人成长体系的账号（企业版 / 静态 API Key）不渲染「签到」「任务」：前者
         // 上游 400「企业账号不支持该操作」，后者 403 growth-only；只留「额度」，点它走
         // /balance，额度由 upstream 的企业口径端点（get-enterprise-user-usage）填充。
         // 九个动作按固定槽位输出，缺位留空 span —— CSS 用 grid 固定列宽，逐行对齐。
+        // 唯一的例外是「探活」：整表没有冻结账号时它不占槽（见上面 anyFrozen）。
         // 「探活」单独占一槽（仅封禁态渲染）：它与「解冻」是两个独立动作，若挤在同一
         // 槽里输出两个按钮，冻结行的列数就与其它行不同，整列又会错位。
         (personal ?
@@ -664,14 +670,15 @@ function renderAccounts(list) {
         (personal ?
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>' : ''),
         '<button class="xs ghost" data-a="proxy" data-u="' + esc(s.uid) + '" title="为该账号绑定出口代理（多个账号可共用同一节点）">代理</button>',
-        (frozen ? '<button class="xs ghost" data-a="probe_ban" data-u="' + esc(s.uid) + '" title="只读探测上游是否已解封：不 revive、不参与选号、不改任何状态">探活</button>' : ''),
+        (frozen ? '<button class="xs ghost" data-a="probe_ban" data-u="' + esc(s.uid) + '" title="只读探测上游是否已解封：不 revive、不参与选号、不改任何状态">探活</button>'
+                : (anyFrozen ? '' : null)),
         (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
                 : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '"' + (s.hold ? ' title="新号默认暂停选号：确认可用后点此进选号池"' : '') + '>恢复选号</button>'
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (personal ? '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额' : '退出选号，但照常保活 / 刷新额度') + '">暂停选号</button>')),
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>'),
         '<button class="xs ghost" data-a="remark" data-u="' + esc(s.uid) + '" title="给这个账号起个本机备注（只存浏览器）">备注</button>',
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>',
-      ].map(html => html || '<span class="slot" aria-hidden="true"></span>').join('') +
+      ].filter(html => html !== null).map(html => html || '<span class="slot" aria-hidden="true"></span>').join('') +
       '</div></td></tr>';
   }).join(''));
   syncAccSel();
@@ -1875,6 +1882,7 @@ const CFG_MAP = {
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'], growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],
+  web_activity_enabled: ['schedule', 'web_activity_enabled'],
   growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   growth_concurrency: ['schedule', 'growth_concurrency'],
   include_disabled_in_tasks: ['schedule', 'include_disabled_in_tasks'],
@@ -1902,11 +1910,13 @@ const CFG_MAP = {
   timeout_seconds: ['upstream', 'timeout_seconds'], header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'], user_agent: ['upstream', 'user_agent'],
   prompt_mode: ['prompt', 'mode'], prompt_file: ['prompt', 'file'],
+  keep_recent_rounds: ['prompt', 'keep_recent_rounds'],
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   sanitize_brand_scope: ['features', 'sanitize_brand_scope'],
   embeddings_enabled: ['features', 'embeddings_enabled'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
+  request_archive_context: ['logging', 'request_archive_context'],
   models_hidden: ['models', 'hidden'],
   models_allowed: ['models', 'allowed'],
   models_aliases: ['models', 'aliases'],
@@ -3942,6 +3952,32 @@ function renderExpirySnapshot(d) {
       '<td class="num">' + fmtTok(daily) + '</td>' +
       '</tr>';
   };
+  // 跨账号合计（issue #102）：同一份快照、同样只算有未来批次的号，按 UTC+8 自然日
+  // 累加「该日到期」。cn/global 的积分不同源，混用时按域分开合计——混加一行没有意义。
+  const expRealm = a => (a.realm === 'global' ? 'global' : 'cn');
+  const splitRealm = new Set(rows.map(r => expRealm(r.a))).size > 1;
+  const dayMap = new Map();
+  for (const { a, bs } of rows) {
+    for (const b of bs) {
+      const key = (splitRealm ? expRealm(a) + '|' : '') + b.date;
+      let t = dayMap.get(key);
+      if (!t) dayMap.set(key, t = { date: b.date, realm: expRealm(a), remain: 0, uids: new Set() });
+      t.remain += b.remain;
+      t.uids.add(String(a.uid || ''));  // 同一账号同日多批只算一个号
+    }
+  }
+  const dayTotals = [...dayMap.values()].sort((x, y) =>
+    (x.date < y.date ? -1 : x.date > y.date ? 1 : 0) || (x.realm < y.realm ? -1 : 1));
+  $('expTotalBody').innerHTML = dayTotals.map(t => {
+    const days = expDayDiff(t.date);
+    return '<tr><td>' + esc(t.date) +
+      (splitRealm ? ' <span class="tag mute">' + (t.realm === 'global' ? '国际版' : '国内版') + '</span>' : '') +
+      '</td>' +
+      '<td class="num" style="color:' + (days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)') + '">' +
+        (days === 0 ? '今天' : days === 1 ? '明天' : days + ' 天') + '</td>' +
+      '<td class="num">' + fmtTok(t.remain) + '</td>' +
+      '<td class="num">' + t.uids.size + '</td></tr>';
+  }).join('');
   // 收纳行沿用「积分构成」页的分组行样式（pk-group-summary / pk-group-toggle）。
   const rest = rows.slice(EXP_HEAD);
   $('expBody').innerHTML = !rows.length ? '<tr><td colspan="5">暂无未来到期批次</td></tr>'
@@ -5131,6 +5167,8 @@ function fmtTokens(n) {
 
 /* ── 请求事件日志 (Keeper 风格大屏) ────────────────────────────────── */
 let rawEventsData = [];
+// eventRows 当前筛选后的行序（与表格 data-ev 下标一致）：展开上下文时按它取事件。
+let eventRows = [];
 
 async function loadEvents() {
   const tb = $('eventTableBody');
@@ -5197,7 +5235,8 @@ function renderEventTable() {
     return;
   }
 
-  const html = filtered.map(e => {
+  eventRows = filtered;
+  const html = filtered.map((e, i) => {
     const d = new Date(e.time);
     const tStr = isNaN(d) ? '-' : (String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0'));
     const dStr = isNaN(d) ? '' : (d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate());
@@ -5240,7 +5279,7 @@ function renderEventTable() {
     const ip = e.client_ip || '-';
     const ua = e.user_agent || '-';
 
-    return '<tr>' +
+    return '<tr data-ev="' + i + '"' + (e.context ? ' title="点击查看请求上下文"' : '') + '>' +
       '<td class="time-cell"><div class="t-time">' + esc(tStr) + '</div><div class="t-date">' + esc(dStr) + '</div></td>' +
       '<td><div class="acct-cell"><span class="acct-icon"></span><span title="' + esc(acctRaw) + '">' + esc(acctClean) + '</span></div></td>' +
       '<td class="model-cell"><div class="m-name">' + esc(mName) + '</div></td>' +
@@ -5306,6 +5345,33 @@ function renderEventStats(list) {
       ''));
   box.hidden = false;
 }
+
+// renderEventContext 把一次请求的会话上下文渲染成「角色 + 原文」块。
+// 只认 archiveContext 写出的三种键（system / messages / prompt）；content 是数组的
+// 多模态块原样 JSON 展示——拆开反而丢掉结构。
+function renderEventContext(ctx) {
+  if (!ctx) return '<div class="ev-ctx-empty">本次请求没有记录上下文（在「配置 → 日志」打开「记录请求上下文」后新产生的请求才有）</div>';
+  const textOf = c => typeof c === 'string' ? c : (c == null ? '' : JSON.stringify(c, null, 2));
+  const block = (role, text) => '<div class="ev-ctx-msg"><span class="ev-ctx-role">' + esc(role) + '</span><pre>' + esc(text) + '</pre></div>';
+  const parts = [];
+  if (ctx.system != null) parts.push(block('system', textOf(ctx.system)));
+  if (ctx.prompt != null) parts.push(block('prompt', textOf(ctx.prompt)));
+  (ctx.messages || []).forEach(m => parts.push(block((m && m.role) || '?', textOf(m && m.content))));
+  return '<div class="ev-ctx">' + parts.join('') + '</div>';
+}
+
+// 事件行点击展开/收起该请求的上下文。挂 tbody 一次，重渲染后照样有效。
+if ($('eventTableBody')) $('eventTableBody').onclick = ev => {
+  const tr = ev.target.closest('tr[data-ev]');
+  if (!tr) return;
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('ev-ctx-row')) { next.remove(); return; }
+  const e = eventRows[Number(tr.dataset.ev)] || {};
+  const row = document.createElement('tr');
+  row.className = 'ev-ctx-row';
+  row.innerHTML = '<td colspan="13">' + renderEventContext(e.context) + '</td>';
+  tr.after(row);
+};
 
 function formatEventNum(n) {
   if (!n || n < 0) return '0';
