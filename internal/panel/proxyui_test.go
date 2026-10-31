@@ -533,12 +533,16 @@ func TestProxyUIActionGridAuto(t *testing.T) {
 	if strings.Contains(auto, "repeat(") {
 		t.Fatalf(".acts-inner.auto 不得继承定宽 8 轨模板：%s", auto)
 	}
-	// 账号表仍用定宽槽位（互斥动作缺位留空槽，逐行对齐靠它）。
-	if !strings.Contains(css, ".acts-inner { display: grid; grid-template-columns: repeat(5, 54px)") {
-		t.Fatal("账号表的定宽 .acts-inner 模板不应改动")
+	// 账号表仍用定宽槽位（互斥动作缺位留空槽，逐行对齐靠它）；「探活」是冻结态专属，
+	// 整表没有冻结账号时连那一列都不占，所以是「base 8 轨 + .with-probe 9 轨」两条规则。
+	if !strings.Contains(css, ".acts-inner { display: grid; grid-template-columns: repeat(4, 54px) 68px repeat(3, 54px);") {
+		t.Fatal("账号表的定宽 .acts-inner 模板应为 8 轨（无探活）")
 	}
-	if !strings.Contains(app, `'<td class="acts"><div class="acts-inner">' + [`) {
-		t.Fatal("renderAccounts 应继续使用定宽 .acts-inner")
+	if !strings.Contains(css, ".acts-inner.with-probe { grid-template-columns: repeat(5, 54px) 68px repeat(3, 54px);") {
+		t.Fatal("缺少 .acts-inner.with-probe 9 轨规则（有冻结账号时多一个探活）")
+	}
+	if !strings.Contains(app, `'<td class="acts"><div class="acts-inner' + (anyFrozen ? ' with-probe' : '') + '">' + [`) {
+		t.Fatal("renderAccounts 应继续使用定宽 .acts-inner，并按 anyFrozen 决定是否带 with-probe")
 	}
 	// 订阅表 2 个按钮、节点表 3 个按钮 → 都用 .acts-inner auto。
 	if n := strings.Count(app, `<div class="acts-inner auto">`); n != 2 {

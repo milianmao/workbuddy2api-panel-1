@@ -761,7 +761,7 @@ func TestIdentitySentenceDetectedAndIdempotent(t *testing.T) {
 func TestPrepareBodySanitizesIdentitySentence(t *testing.T) {
 	rw := identitySentenceRule(t)
 	body := []byte(`{"model":"deepseek-v4.1-flash","messages":[{"role":"system","content":"` + rw[0] + `."}]}`)
-	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", nil, "", "", false)
+	out, _, _ := prepareBodyOpt(body, true, true, nil, nil, nil, "", nil, "", "", false, 0)
 	if strings.Contains(string(out), rw[0]) {
 		t.Errorf("system 原文案仍出站：%s", out)
 	}
