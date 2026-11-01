@@ -166,14 +166,6 @@ run().catch(e => { console.error(e); process.exit(1); });`
 		StatsHiddenEmpty bool    `json:"statsHiddenEmpty"`
 		StatsEmptyHTML   string  `json:"statsEmptyHTML"`
 		StatsAgain       string  `json:"statsAgain"`
-		E501             string  `json:"e501"`
-		Badge501         string  `json:"badge501"`
-		E500             string  `json:"e500"`
-		Rows             int     `json:"rows"`
-		Cells            float64 `json:"cells"`
-		HasFakeKey       bool    `json:"hasFakeKey"`
-		HasUpstreamLie   bool    `json:"hasUpstreamLie"`
-		CacheMiss        bool    `json:"cacheMiss"`
 		OldEffort        bool    `json:"oldEffort"`
 		GwEffort         bool    `json:"gwEffort"`
 		RwEffort         bool    `json:"rwEffort"`
