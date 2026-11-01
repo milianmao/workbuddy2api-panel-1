@@ -596,6 +596,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 健康探测循环（上游 #122 的 Manager.Run）：不跑这个循环，health 永远是空，
+	// selectLocked 会判定「无健康节点」而 fail-closed —— 全站 503。
+	proxyCtx, stopProxies := context.WithCancel(ctx)
+	proxyDone := make(chan struct{})
+	go func() {
+		defer close(proxyDone)
+		proxySvc.Run(proxyCtx)
+	}()
+	defer func() { stopProxies(); <-proxyDone }()
 	updateManager.SetRestart(stop)
 	go updateManager.Run(ctx)
 	// 账号后台任务（taskjobs）：状态与主 state 同目录，重启后自动恢复未完成作业。
