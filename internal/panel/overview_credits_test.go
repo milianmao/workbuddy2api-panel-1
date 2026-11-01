@@ -94,7 +94,10 @@ func TestOverviewTodayCreditsMatrix(t *testing.T) {
 	wantCredits(t, got, "u4", 0) // 回执金额 0 → 0（与「—」区分开）
 
 	// 开代理池的分支同样要注入——否则一开代理今日积分就消失。
-	pp := proxypool.New("", nil)
+	pp, err := proxypool.New("", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(pp.Close)
 	pnProxy := New(Config{Version: "test", Pool: newPool(), Proxypool: pp, Usage: rec})
 	gotProxy := get(pnProxy)
@@ -152,16 +155,22 @@ func TestOverviewCreditsKeepsProxySemantics(t *testing.T) {
 	}
 
 	// Proxypool != nil 但账号未绑定：不能因为查了空 ProxyID 而拿到别人的节点。
-	pp := proxypool.New("", nil)
+	pp, err := proxypool.New("", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(pp.Close)
-	res, err := pp.AddRaw("http://u:p@127.0.0.1:1#node-one")
-	if err != nil || res.Imported != 1 {
-		t.Fatalf("AddRaw=%+v err=%v", res, err)
+	res, err := pp.Import("http://u:p@127.0.0.1:1")
+	if err != nil || len(res) != 1 || res[0].Status != "added" {
+		t.Fatalf("Import=%+v err=%v", res, err)
+	}
+	// 绑定关系在 #122 池里（旧 pool.SetAccountProxy 已退化为迁移来源）。
+	if err := pp.Bind("u1", proxypool.Binding{Mode: "fixed", ProxyID: res[0].ID}); err != nil {
+		t.Fatal(err)
 	}
 	p := newPool()
-	p.SetAccountProxy("u1", pp.List()[0].ID) // u1 绑定；u2 保持空
 	m := rowsOf(New(Config{Version: "test", Pool: p, Proxypool: pp}))
-	if r := m["u1"]; r.ProxyTag != "node-one" || !r.ProxyOK {
+	if r := m["u1"]; r.ProxyTag != "127.0.0.1:1" || !r.ProxyOK {
 		t.Fatalf("u1 绑定节点未注入: %+v", r)
 	}
 	if r := m["u2"]; r.ProxyID != "" || r.ProxyTag != "" || r.ProxyOK {

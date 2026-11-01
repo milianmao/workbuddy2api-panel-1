@@ -7,38 +7,91 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/nodebridge"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 )
 
-// newProxyPanel 构造带代理池的面板：两个账号（u1/u2）+ 一个 http 类型节点
-// （指向本地假 CONNECT 代理 fixture 的地址占位——绑定/列表/订阅接口不需要真实可拨）。
-func newProxyPanel(t *testing.T) (*Panel, *pool.Pool, *proxypool.Pool) {
+// proxyFixture 是「桥 + 上游池 + 面板」的测试装配。
+// 节点经 nodebridge 在本机开 socks5 监听，再以 socks5:// URL 进上游 Manager。
+type proxyFixture struct {
+	pn *Panel
+	p  *pool.Pool
+	pp *proxypool.Manager
+	br *nodebridge.Bridge
+}
+
+// newProxyFixture 默认两个 socks5 节点（端口 1/2 不会真的被拨，仅占位）。
+func newProxyFixture(t *testing.T) *proxyFixture {
 	t.Helper()
+	return newProxyFixtureWith(t,
+		map[string]any{"name": "node-one", "type": "socks5", "server": "127.0.0.1", "port": 1, "password": "one-secret"},
+		map[string]any{"name": "node-two", "type": "socks5", "server": "127.0.0.1", "port": 2},
+	)
+}
+
+// newProxyFixtureWith 按旧 proxies.json 的落盘形状造节点：外层是面板元信息，
+// raw 才是 mihomo 的代理定义（桥只认 raw，没有 raw 的条目会被跳过）。
+func newProxyFixtureWith(t *testing.T, raws ...map[string]any) *proxyFixture {
+	t.Helper()
+	nodes := map[string]any{}
+	for i, raw := range raws {
+		id := fmt.Sprintf("n%d", i+1)
+		tag, _ := raw["name"].(string)
+		nodes[id] = map[string]any{
+			"id": id, "tag": tag, "type": raw["type"], "server": raw["server"],
+			"port": raw["port"], "enabled": true, "raw": raw,
+		}
+	}
+	disk := map[string]any{"version": 1, "subs": map[string]any{}, "nodes": nodes}
+	blob, _ := json.Marshal(disk)
+	path := filepath.Join(t.TempDir(), "proxies.json")
+	if err := os.WriteFile(path, blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	br, err := nodebridge.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := br.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(br.Close)
+
+	pp, err := proxypool.New("", &http.Transport{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pp.Close)
+	if text := br.Lines(); text != "" {
+		if _, err := pp.Import(text); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1", AccessToken: "at"})
 	p.Add(&auth.Auth{UID: "u2", AccessToken: "at"})
-	pp := proxypool.New("", nil)
-	t.Cleanup(pp.Close)
-	// 与 main 装配一致：节点删除回调 → 池批量解绑。
-	pp.SetUnbindCallback(func(ids []string) []string {
-		idSet := make(map[string]bool, len(ids))
-		for _, id := range ids {
-			idSet[id] = true
+	pn := New(Config{Version: "test", Pool: p, Proxypool: pp, NodeBridge: br})
+	return &proxyFixture{pn: pn, p: p, pp: pp, br: br}
+}
+
+// nodeID 按节点名（=桥里的 tag）取上游池 ID。
+func (f *proxyFixture) nodeID(t *testing.T, tag string) string {
+	t.Helper()
+	for _, v := range f.pp.Snapshot().Proxies {
+		if m, ok := f.br.Meta(v.URL); ok && m.Tag == tag {
+			return v.ID
 		}
-		return p.ClearProxyIfMatch(idSet)
-	})
-	// http 类型节点：解析/绑定语义不需要真实握手；可拨性测试在 proxypool 包覆盖。
-	res, err := pp.AddRaw("http://u:p@127.0.0.1:1#node-one\nss://YWVzLTI1Ni1nY206cA@127.0.0.1:2#node-two")
-	if err != nil || res.Imported != 2 {
-		t.Fatalf("AddRaw=%+v err=%v", res, err)
 	}
-	pn := New(Config{Version: "test", Pool: p, Proxypool: pp})
-	return pn, p, pp
+	t.Fatalf("节点 %q 不在池里", tag)
+	return ""
 }
 
 func doJSONReq(t *testing.T, pn *Panel, method, path string, body any) (*httptest.ResponseRecorder, map[string]any) {
@@ -55,442 +108,253 @@ func doJSONReq(t *testing.T, pn *Panel, method, path string, body any) (*httptes
 	return rec, out
 }
 
-// TestBindProxyAPI 绑定/解绑/404（uid 不存在 / 节点不存在）。
+// TestBindProxyAPI 绑定 → fixed、空 proxy_id → random（删条目）、mode=direct → direct，
+// 以及 404（uid 不存在 / 节点不存在）。
 func TestBindProxyAPI(t *testing.T) {
-	pn, p, pp := newProxyPanel(t)
-	nodeID := pp.List()[0].ID
+	f := newProxyFixture(t)
+	nodeID := f.nodeID(t, "node-one")
 
-	// uid 不存在 → 404 "account not found"。
-	rec, body := doJSONReq(t, pn, http.MethodPost, "/panel/api/accounts/ghost/bind_proxy", map[string]any{"proxy_id": nodeID})
-	if rec.Code != http.StatusNotFound || body["error"] != "account not found" {
-		t.Fatalf("ghost: code=%d body=%v", rec.Code, body)
+	rec, _ := doJSONReq(t, f.pn, http.MethodPost, "/panel/api/accounts/ghost/bind_proxy",
+		map[string]any{"proxy_id": nodeID})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("未知账号应 404，得到 %d", rec.Code)
 	}
-	// 节点不存在 → 404 "proxy not found"。
-	rec, body = doJSONReq(t, pn, http.MethodPost, "/panel/api/accounts/u1/bind_proxy", map[string]any{"proxy_id": "nope"})
-	if rec.Code != http.StatusNotFound || body["error"] != "proxy not found" {
-		t.Fatalf("bad proxy: code=%d body=%v", rec.Code, body)
+
+	rec, _ = doJSONReq(t, f.pn, http.MethodPost, "/panel/api/accounts/u1/bind_proxy",
+		map[string]any{"proxy_id": "nope"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("未知节点应 404，得到 %d", rec.Code)
 	}
-	// 绑定 → ok + proxy_tag。
-	rec, body = doJSONReq(t, pn, http.MethodPost, "/panel/api/accounts/u1/bind_proxy", map[string]any{"proxy_id": nodeID})
-	if rec.Code != http.StatusOK || body["ok"] != true || body["proxy_tag"] != "node-one" {
-		t.Fatalf("bind: code=%d body=%v", rec.Code, body)
+
+	rec, body := doJSONReq(t, f.pn, http.MethodPost, "/panel/api/accounts/u1/bind_proxy",
+		map[string]any{"proxy_id": nodeID})
+	if rec.Code != http.StatusOK || body["mode"] != "fixed" {
+		t.Fatalf("绑定应成功并回 mode=fixed，得到 %d %+v", rec.Code, body)
 	}
-	if got := p.AccountProxy("u1"); got != nodeID {
-		t.Fatalf("pool 未落绑定: %q", got)
+	if got := body["proxy_tag"]; got != "node-one" {
+		t.Fatalf("回显的 proxy_tag 应来自桥：%+v", body)
 	}
-	// 解绑（proxy_id=""）→ ok + 空 tag。
-	rec, body = doJSONReq(t, pn, http.MethodPost, "/panel/api/accounts/u1/bind_proxy", map[string]any{"proxy_id": ""})
-	if rec.Code != http.StatusOK || body["ok"] != true || body["proxy_tag"] != "" {
-		t.Fatalf("unbind: code=%d body=%v", rec.Code, body)
+	if b := f.pp.Snapshot().Bindings["u1"]; b.Mode != "fixed" || b.ProxyID != nodeID {
+		t.Fatalf("绑定未落到上游池：%+v", b)
 	}
-	if got := p.AccountProxy("u1"); got != "" {
-		t.Fatalf("解绑未生效: %q", got)
+
+	// 空 proxy_id = 解绑 = 默认随机（随机池仍受出口约束，不会用宿主 IP）。
+	rec, body = doJSONReq(t, f.pn, http.MethodPost, "/panel/api/accounts/u1/bind_proxy",
+		map[string]any{"proxy_id": ""})
+	if rec.Code != http.StatusOK || body["mode"] != "random" {
+		t.Fatalf("解绑应回 mode=random，得到 %d %+v", rec.Code, body)
+	}
+	if _, ok := f.pp.Snapshot().Bindings["u1"]; ok {
+		t.Fatal("解绑后不该留 bindings 条目")
+	}
+
+	rec, body = doJSONReq(t, f.pn, http.MethodPost, "/panel/api/accounts/u2/bind_proxy",
+		map[string]any{"mode": "direct"})
+	if rec.Code != http.StatusOK || body["mode"] != "direct" {
+		t.Fatalf("显式直连应成功，得到 %d %+v", rec.Code, body)
+	}
+	if b := f.pp.Snapshot().Bindings["u2"]; b.Mode != "direct" {
+		t.Fatalf("direct 未落到上游池：%+v", b)
 	}
 }
 
-// TestProxiesListAccountsCount 列表 accounts 计数：两个账号绑同一节点 → accounts=2。
-func TestProxiesListAccountsCount(t *testing.T) {
-	pn, _, pp := newProxyPanel(t)
-	nodeID := pp.List()[0].ID
-	if !pn.cfg.Pool.SetAccountProxy("u1", nodeID) {
-		t.Fatal("bind u1")
+// TestBindProxyToDisabledNode 停用节点允许预绑定（不给 4xx），重启/启用后自动生效。
+func TestBindProxyToDisabledNode(t *testing.T) {
+	f := newProxyFixture(t)
+	nodeID := f.nodeID(t, "node-two")
+	off := false
+	if err := f.pp.Update(nodeID, proxypool.Input{Enabled: &off}); err != nil {
+		t.Fatal(err)
 	}
-	if !pn.cfg.Pool.SetAccountProxy("u2", nodeID) {
-		t.Fatal("bind u2")
+	rec, body := doJSONReq(t, f.pn, http.MethodPost, "/panel/api/accounts/u1/bind_proxy",
+		map[string]any{"proxy_id": nodeID})
+	if rec.Code != http.StatusOK || body["mode"] != "fixed" {
+		t.Fatalf("停用节点应允许预绑定，得到 %d %+v", rec.Code, body)
 	}
-	rec, body := doJSONReq(t, pn, http.MethodGet, "/panel/api/proxies", nil)
-	if rec.Code != http.StatusOK || body["ok"] != true {
-		t.Fatalf("list: code=%d body=%v", rec.Code, body)
+}
+
+// TestProxiesListAPI 列表形状：proxies 带桥元信息（tag/type/server/port），subs 是数组。
+func TestProxiesListAPI(t *testing.T) {
+	f := newProxyFixture(t)
+	rec, body := doJSONReq(t, f.pn, http.MethodGet, "/panel/api/proxies", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("列表应 200，得到 %d", rec.Code)
 	}
-	proxies, _ := body["proxies"].([]any)
-	if len(proxies) != 2 {
-		t.Fatalf("proxies=%v", body["proxies"])
+	list, ok := body["proxies"].([]any)
+	if !ok || len(list) != 2 {
+		t.Fatalf("应有 2 个节点，得到 %+v", body["proxies"])
 	}
-	first, _ := proxies[0].(map[string]any)
-	wantFields := []string{"id", "tag", "type", "server", "port", "sub_id", "enabled", "latency_ms", "checked_at", "fails", "accounts"}
-	for _, k := range wantFields {
+	first := list[0].(map[string]any)
+	for _, k := range []string{"id", "tag", "type", "server", "port", "enabled", "latency_ms", "accounts"} {
 		if _, ok := first[k]; !ok {
-			t.Fatalf("契约字段缺失: %s（got %v）", k, first)
+			t.Fatalf("节点行缺字段 %q：%+v", k, first)
 		}
 	}
-	var accountsSum int
-	for _, it := range proxies {
-		m, _ := it.(map[string]any)
-		if m["accounts"].(float64) > 0 {
-			accountsSum += int(m["accounts"].(float64))
-		}
+	if first["type"] != "socks5" || first["server"] != "127.0.0.1" {
+		t.Fatalf("节点行应回桥里的真实协议/服务器：%+v", first)
 	}
-	if accountsSum != 2 {
-		t.Fatalf("accounts 计数=%d want 2", accountsSum)
-	}
-	// subs 形状。
-	subs, _ := body["subs"].([]any)
-	if len(subs) != 0 {
-		t.Fatalf("subs=%v", subs)
+	if _, ok := body["subs"].([]any); !ok {
+		t.Fatalf("subs 必须是数组（空也要给 []），得到 %#v", body["subs"])
 	}
 }
 
-// TestProxiesMutations 导入 / toggle / delete（含解绑）。
-func TestProxiesMutations(t *testing.T) {
-	pn, p, pp := newProxyPanel(t)
-	// 导入。
-	rec, body := doJSONReq(t, pn, http.MethodPost, "/panel/api/proxies", map[string]any{"text": "ss://YWVzLTI1Ni1nY206cA@3.3.3.3:8388#imported"})
-	if rec.Code != http.StatusOK || body["ok"] != true || body["imported"].(float64) != 1 {
-		t.Fatalf("import: code=%d body=%v", rec.Code, body)
+// TestProxyListHidesSecrets 节点密码不得出现在列表响应里。
+func TestProxyListHidesSecrets(t *testing.T) {
+	f := newProxyFixture(t)
+	rec, _ := doJSONReq(t, f.pn, http.MethodGet, "/panel/api/proxies", nil)
+	if strings.Contains(rec.Body.String(), "one-secret") {
+		t.Fatalf("列表泄露了节点密码：%s", rec.Body.String())
 	}
-	imported := ""
-	for _, n := range pp.List() {
-		if n.Tag == "imported" {
-			imported = n.ID
+}
+
+// TestProxiesImportToggleDelete 手动导入（一行一个 URL）→ 启停 → 删除 → 404。
+func TestProxiesImportToggleDelete(t *testing.T) {
+	f := newProxyFixture(t)
+	base := len(f.pp.Snapshot().Proxies)
+
+	rec, body := doJSONReq(t, f.pn, http.MethodPost, "/panel/api/proxies",
+		map[string]any{"text": "socks5://u:p@3.3.3.3:1080"})
+	if rec.Code != http.StatusOK || body["imported"].(float64) != 1 {
+		t.Fatalf("导入应成功：%d %+v", rec.Code, body)
+	}
+	if got := len(f.pp.Snapshot().Proxies); got != base+1 {
+		t.Fatalf("节点数应为 %d，得到 %d", base+1, got)
+	}
+
+	// 重复导入 → duplicate 计入 skipped，不报错。
+	_, body = doJSONReq(t, f.pn, http.MethodPost, "/panel/api/proxies",
+		map[string]any{"text": "socks5://u:p@3.3.3.3:1080"})
+	if body["imported"].(float64) != 0 || body["skipped"].(float64) != 1 {
+		t.Fatalf("重复导入应 imported=0 skipped=1：%+v", body)
+	}
+
+	// 非法行 → 200 + errors（不整批失败）。
+	rec, body = doJSONReq(t, f.pn, http.MethodPost, "/panel/api/proxies",
+		map[string]any{"text": "definitely-not-a-proxy-url"})
+	if rec.Code != http.StatusOK || body["imported"].(float64) != 0 {
+		t.Fatalf("非法行应 200 且 imported=0：%d %+v", rec.Code, body)
+	}
+	if errs, _ := body["errors"].([]any); len(errs) != 1 {
+		t.Fatalf("非法行应回一条 errors：%+v", body)
+	}
+
+	var imported string
+	for _, v := range f.pp.Snapshot().Proxies {
+		if v.Name == "3.3.3.3:1080" {
+			imported = v.ID
 		}
 	}
 	if imported == "" {
-		t.Fatal("imported node missing")
+		t.Fatal("找不到刚导入的节点（Name 应为 host:port）")
 	}
-	// toggle。
-	rec, body = doJSONReq(t, pn, http.MethodPost, "/panel/api/proxies/"+imported+"/toggle", nil)
+
+	rec, body = doJSONReq(t, f.pn, http.MethodPost, "/panel/api/proxies/"+imported+"/toggle", nil)
 	if rec.Code != http.StatusOK || body["enabled"] != false {
-		t.Fatalf("toggle: code=%d body=%v", rec.Code, body)
+		t.Fatalf("启停应成功并回 enabled=false：%d %+v", rec.Code, body)
 	}
-	// 绑定后删除 → 自动解绑。
-	if !p.SetAccountProxy("u1", imported) {
-		t.Fatal("bind")
+
+	rec, _ = doJSONReq(t, f.pn, http.MethodDelete, "/panel/api/proxies/"+imported, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("删除应 200，得到 %d", rec.Code)
 	}
-	rec, body = doJSONReq(t, pn, http.MethodDelete, "/panel/api/proxies/"+imported, nil)
-	if rec.Code != http.StatusOK || body["ok"] != true {
-		t.Fatalf("delete: code=%d body=%v", rec.Code, body)
-	}
-	if got := p.AccountProxy("u1"); got != "" {
-		t.Fatalf("删除后未解绑: %q", got)
-	}
-	// 未知节点 404。
-	rec, _ = doJSONReq(t, pn, http.MethodDelete, "/panel/api/proxies/missing", nil)
+	rec, _ = doJSONReq(t, f.pn, http.MethodDelete, "/panel/api/proxies/missing", nil)
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("delete missing: code=%d", rec.Code)
+		t.Fatalf("删除不存在节点应 404，得到 %d", rec.Code)
 	}
 }
 
-// TestSubscriptionsLifecycle 用 httptest 充当订阅源：create+sync → 再 sync →
-// delete（removed_nodes / unbound_accounts）。
-func TestSubscriptionsLifecycle(t *testing.T) {
-	const subYAML = `proxies:
-  - name: sub-node-a
-    type: ss
-    server: 1.1.1.1
-    port: 8388
-    cipher: aes-256-gcm
-    password: p
-  - name: sub-node-b
-    type: ss
-    server: 2.2.2.2
-    port: 8388
-    cipher: aes-256-gcm
-    password: p
-`
+// TestProxyImportBodyTooLarge 请求体超上限 → 413（不是 OOM，也不是 400）。
+func TestProxyImportBodyTooLarge(t *testing.T) {
+	f := newProxyFixture(t)
+	// 必须是「合法 JSON 形状 + 超长正文」：裸垃圾会在读到上限之前就被 json 判成
+	// 语法错误（400），测不到 MaxBytesReader 那条路。
+	var buf bytes.Buffer
+	buf.WriteString(`{"text":"`)
+	buf.WriteString(strings.Repeat("a", proxyImportMaxBytes))
+	buf.WriteString(`"}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/proxies", bytes.NewReader(buf.Bytes()))
+	f.pn.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超限应 413，得到 %d", rec.Code)
+	}
+}
+
+// TestProxySubscriptionLifecycle 建订阅（拉取→桥→池）→ 列表统计 → 同步幂等 → 删除。
+func TestProxySubscriptionLifecycle(t *testing.T) {
+	f := newProxyFixture(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, subYAML)
+		fmt.Fprint(w, `
+proxies:
+  - {name: "sub-one", type: socks5, server: 127.0.0.1, port: 1080}
+  - {name: "sub-two", type: socks5, server: 127.0.0.1, port: 1081}
+`)
 	}))
 	defer srv.Close()
 
-	pn, p, _ := newProxyPanel(t)
-	// 创建 + 立即同步。
-	rec, body := doJSONReq(t, pn, http.MethodPost, "/panel/api/subscriptions", map[string]any{"name": "机场", "url": srv.URL})
-	if rec.Code != http.StatusOK || body["ok"] != true {
-		t.Fatalf("create: code=%d body=%v", rec.Code, body)
+	rec, body := doJSONReq(t, f.pn, http.MethodPost, "/panel/api/subscriptions",
+		map[string]any{"name": "机场", "url": srv.URL})
+	if rec.Code != http.StatusOK || body["imported"].(float64) != 2 {
+		t.Fatalf("建订阅应导入 2 个节点：%d %+v", rec.Code, body)
 	}
-	if body["total"].(float64) != 2 || body["imported"].(float64) != 2 {
-		t.Fatalf("create sync: %v", body)
-	}
-	sub, _ := body["sub"].(map[string]any)
-	if sub["count"].(float64) != 2 || sub["name"] != "机场" || sub["url"] != srv.URL {
-		t.Fatalf("sub=%v", sub)
-	}
-	subID := sub["id"].(string)
+	subID, _ := body["id"].(string)
 
-	// 绑定一个账号到 sub 节点，然后删除订阅 → removed_nodes=2, unbound_accounts=1。
-	var subNodeID string
-	for _, n := range pn.cfg.Proxypool.List() {
-		if n.Tag == "sub-node-a" {
-			subNodeID = n.ID
-		}
+	_, list := doJSONReq(t, f.pn, http.MethodGet, "/panel/api/proxies", nil)
+	subs, _ := list["subs"].([]any)
+	if len(subs) != 1 {
+		t.Fatalf("应有一条订阅，得到 %+v", list["subs"])
 	}
-	p.SetAccountProxy("u1", subNodeID)
-	rec, body = doJSONReq(t, pn, http.MethodDelete, "/panel/api/subscriptions/"+subID, nil)
-	if rec.Code != http.StatusOK || body["ok"] != true {
-		t.Fatalf("delete sub: code=%d body=%v", rec.Code, body)
+	if got := subs[0].(map[string]any)["count"].(float64); got != 2 {
+		t.Fatalf("订阅节点数应为 2，得到 %v", got)
 	}
-	if body["removed_nodes"].(float64) != 2 || body["unbound_accounts"].(float64) != 1 {
-		t.Fatalf("delete sub: %v", body)
+
+	// 再同步一次：节点已存在 → 不重复入池。
+	rec, body = doJSONReq(t, f.pn, http.MethodPost, "/panel/api/subscriptions/"+subID+"/sync", nil)
+	if rec.Code != http.StatusOK || body["imported"].(float64) != 0 {
+		t.Fatalf("重复同步应 imported=0：%d %+v", rec.Code, body)
 	}
-	if got := p.AccountProxy("u1"); got != "" {
-		t.Fatalf("订阅删除后未解绑: %q", got)
+
+	rec, _ = doJSONReq(t, f.pn, http.MethodPost, "/panel/api/subscriptions/none/sync", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("同步不存在订阅应 400，得到 %d", rec.Code)
 	}
-	// 重复删除 404。
-	rec, _ = doJSONReq(t, pn, http.MethodDelete, "/panel/api/subscriptions/"+subID, nil)
+
+	rec, _ = doJSONReq(t, f.pn, http.MethodDelete, "/panel/api/subscriptions/"+subID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("删订阅应 200，得到 %d", rec.Code)
+	}
+	rec, _ = doJSONReq(t, f.pn, http.MethodDelete, "/panel/api/subscriptions/"+subID, nil)
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("double delete: code=%d", rec.Code)
+		t.Fatalf("重复删订阅应 404，得到 %d", rec.Code)
 	}
 }
 
-// TestSyncSubscriptionEndpoint 手动同步端点（机场内容已变化 → 整体替换）。
-func TestSyncSubscriptionEndpoint(t *testing.T) {
-	subYAML := `proxies:
-  - name: s1
-    type: ss
-    server: 1.1.1.1
-    port: 8388
-    cipher: aes-256-gcm
-    password: p
-`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, subYAML)
-	}))
-	defer srv.Close()
-
-	pn, _, _ := newProxyPanel(t)
-	_, body := doJSONReq(t, pn, http.MethodPost, "/panel/api/subscriptions", map[string]any{"url": srv.URL})
-	sub, _ := body["sub"].(map[string]any)
-	subID := sub["id"].(string)
-
-	// 内容变化：s1 消失、s2 出现。
-	subYAML = `proxies:
-  - name: s2
-    type: ss
-    server: 2.2.2.2
-    port: 8388
-    cipher: aes-256-gcm
-    password: p
-`
-	rec, body := doJSONReq(t, pn, http.MethodPost, "/panel/api/subscriptions/"+subID+"/sync", nil)
-	if rec.Code != http.StatusOK || body["imported"].(float64) != 1 {
-		t.Fatalf("sync: code=%d body=%v", rec.Code, body)
+// TestProxySubscriptionBadURL 非 http(s) 订阅地址与拉取失败都要 400 且不留下空订阅。
+func TestProxySubscriptionBadURL(t *testing.T) {
+	f := newProxyFixture(t)
+	rec, _ := doJSONReq(t, f.pn, http.MethodPost, "/panel/api/subscriptions",
+		map[string]any{"url": "socks5://127.0.0.1:1"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非 http(s) 订阅应 400，得到 %d", rec.Code)
 	}
-	tags := map[string]bool{}
-	for _, n := range pn.cfg.Proxypool.List() {
-		tags[n.Tag] = true
-	}
-	if tags["s1"] || !tags["s2"] {
-		t.Fatalf("整体替换未生效: %v", tags)
-	}
-	// 未知订阅 → 404（not-found 与「拉取/解析失败」必须是不同出口：后者 502）。
-	rec, body = doJSONReq(t, pn, http.MethodPost, "/panel/api/subscriptions/none/sync", nil)
-	if rec.Code != http.StatusNotFound || body["ok"] != false {
-		t.Fatalf("unknown sub 应 404: code=%d body=%v", rec.Code, body)
+	if got := len(f.br.Subs()); got != 0 {
+		t.Fatalf("失败不应留下订阅记录，得到 %d 条", got)
 	}
 }
 
-// TestOverviewProxyFields overview 账号项注入 proxy_id/proxy_tag/proxy_ok。
-func TestOverviewProxyFields(t *testing.T) {
-	pn, p, pp := newProxyPanel(t)
-	nodeID := pp.List()[0].ID // node-one（enabled）
-	p.SetAccountProxy("u1", nodeID)
-	// u2 绑一个已停用节点 → proxy_ok=false。
-	disabled := pp.List()[1].ID
-	if _, err := pp.Toggle(disabled); err != nil {
-		t.Fatal(err)
-	}
-	p.SetAccountProxy("u2", disabled)
-
-	rec := httptest.NewRecorder()
-	pn.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/panel/api/overview", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code=%d", rec.Code)
-	}
-	var d struct {
-		Accounts []struct {
-			UID      string `json:"uid"`
-			ProxyID  string `json:"proxy_id"`
-			ProxyTag string `json:"proxy_tag"`
-			ProxyOK  bool   `json:"proxy_ok"`
-		} `json:"accounts"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
-		t.Fatal(err)
-	}
-	byUID := map[string]struct {
-		UID      string `json:"-"`
-		ProxyID  string
-		ProxyTag string
-		ProxyOK  bool
-	}{}
-	for _, a := range d.Accounts {
-		byUID[a.UID] = struct {
-			UID      string `json:"-"`
-			ProxyID  string
-			ProxyTag string
-			ProxyOK  bool
-		}{a.UID, a.ProxyID, a.ProxyTag, a.ProxyOK}
-	}
-	if v, ok := byUID["u1"]; !ok || v.ProxyID != nodeID || v.ProxyTag != "node-one" || !v.ProxyOK {
-		t.Fatalf("u1=%+v", v)
-	}
-	if v, ok := byUID["u2"]; !ok || v.ProxyID != disabled || v.ProxyTag == "" || v.ProxyOK {
-		t.Fatalf("u2=%+v（停用节点应 proxy_ok=false）", v)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// S9 回归：列表不泄漏节点出站凭据（Raw），但契约字段齐全
-// ---------------------------------------------------------------------------
-
-// TestProxiesListOmitsRawCredentials 列表每 5s 轮询，raw（password/uuid/obfs…）
-// 不得出现在响应里。
-func TestProxiesListOmitsRawCredentials(t *testing.T) {
-	pn, p, pp := newProxyPanel(t)
-	// 造一个带凭据的节点（ss 的 password 只在 raw 里）。
-	res, err := pp.AddRaw("ss://YWVzLTI1Ni1nY206c2VjcmV0LXBhc3M@9.9.9.9:8388#secret-node")
-	if err != nil || res.Imported != 1 {
-		t.Fatalf("AddRaw=%+v err=%v", res, err)
-	}
-	var secretID string
-	for _, n := range pp.List() {
-		if n.Tag == "secret-node" {
-			secretID = n.ID
-			if n.Raw == nil || n.Raw["password"] == nil {
-				t.Fatalf("fixture 应带 password: %+v", n.Raw)
-			}
+// TestProxyEndpointsWithoutPool 未装配代理池 → 501（不是 panic）。
+func TestProxyEndpointsWithoutPool(t *testing.T) {
+	p := pool.New("")
+	pn := New(Config{Version: "test", Pool: p})
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/panel/api/proxies"},
+		{http.MethodPost, "/panel/api/proxies"},
+		{http.MethodPost, "/panel/api/proxies/x/toggle"},
+		{http.MethodPost, "/panel/api/subscriptions"},
+	} {
+		rec, _ := doJSONReq(t, pn, tc.method, tc.path, map[string]any{})
+		if rec.Code != http.StatusNotImplemented {
+			t.Fatalf("%s %s 应 501，得到 %d", tc.method, tc.path, rec.Code)
 		}
-	}
-	if secretID == "" {
-		t.Fatal("fixture 节点缺失")
-	}
-	p.SetAccountProxy("u1", secretID)
-
-	rec, body := doJSONReq(t, pn, http.MethodGet, "/panel/api/proxies", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code=%d", rec.Code)
-	}
-	rawBody := rec.Body.String()
-	if strings.Contains(rawBody, "raw") || strings.Contains(rawBody, "secret-pass") {
-		t.Fatalf("列表泄漏了节点出站配置: %s", rawBody)
-	}
-	proxies, _ := body["proxies"].([]any)
-	if len(proxies) != 3 {
-		t.Fatalf("proxies=%d", len(proxies))
-	}
-	// 契约字段仍在（前端只用这些）。
-	wantFields := []string{"id", "tag", "type", "server", "port", "sub_id", "enabled",
-		"latency_ms", "checked_at", "fails", "accounts"}
-	for _, it := range proxies {
-		m, _ := it.(map[string]any)
-		for _, k := range wantFields {
-			if _, ok := m[k]; !ok {
-				t.Fatalf("契约字段缺失 %q: %v", k, m)
-			}
-		}
-		if _, ok := m["raw"]; ok {
-			t.Fatalf("不应有 raw 字段: %v", m)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// S7 回归：导入请求体上限 + 单次节点数上限
-// ---------------------------------------------------------------------------
-
-// TestProxiesImportBodyLimit 超限请求体 → 413（修复前无上限，直接读进内存）。
-func TestProxiesImportBodyLimit(t *testing.T) {
-	pn, _, pp := newProxyPanel(t)
-	before := len(pp.List())
-	// 6 MiB 的合法 JSON（text 里塞大块 URI 备注）。
-	huge := `{"text":"` + "ss://YWVzLTI1Ni1nY206cA@1.1.1.1:8388#" + strings.Repeat("x", 6<<20) + `"}`
-	rec := httptest.NewRecorder()
-	pn.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/panel/api/proxies", strings.NewReader(huge)))
-	if rec.Code != http.StatusRequestEntityTooLarge && rec.Code != http.StatusBadRequest {
-		t.Fatalf("超限请求体应 413/400，得到 %d: %s", rec.Code, rec.Body.String())
-	}
-	if got := len(pp.List()); got != before {
-		t.Fatalf("超限请求不得改动节点: %d → %d", before, got)
-	}
-}
-
-// TestProxiesImportNodeLimit 单次导入节点数上限在结果里体现 skipped/errors。
-func TestProxiesImportNodeLimit(t *testing.T) {
-	pn, _, pp := newProxyPanel(t)
-	base := len(pp.List())
-	var sb strings.Builder
-	for i := 0; i < 1010; i++ {
-		fmt.Fprintf(&sb, "ss://YWVzLTI1Ni1nY206cA@10.1.%d.%d:8388#n%d\n", i/250, i%250, i)
-	}
-	rec, body := doJSONReq(t, pn, http.MethodPost, "/panel/api/proxies", map[string]any{"text": sb.String()})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%v", rec.Code, body)
-	}
-	if body["imported"].(float64) != 1000 {
-		t.Fatalf("imported=%v want 1000", body["imported"])
-	}
-	if body["skipped"].(float64) != 10 {
-		t.Fatalf("skipped=%v want 10", body["skipped"])
-	}
-	errs, _ := body["errors"].([]any)
-	if len(errs) == 0 || !strings.Contains(fmt.Sprint(errs), "limit") {
-		t.Fatalf("errors 应说明节点数上限: %v", body["errors"])
-	}
-	if got := len(pp.List()); got != base+1000 {
-		t.Fatalf("池内节点数=%d want %d", got, base+1000)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// S8 回归：sync 的 not-found 是 404，拉取失败才是 502
-// ---------------------------------------------------------------------------
-
-func TestSubscriptionSyncNotFoundIs404(t *testing.T) {
-	pn, _, _ := newProxyPanel(t)
-	rec, body := doJSONReq(t, pn, http.MethodPost, "/panel/api/subscriptions/nope/sync", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("未知订阅应 404，得到 %d: %v", rec.Code, body)
-	}
-	if body["ok"] != false {
-		t.Fatalf("body=%v", body)
-	}
-}
-
-func TestSubscriptionSyncFetchFailureIs502(t *testing.T) {
-	// 指向一个已关闭的本地 listener：拉取必然失败（非 not-found）。
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	url := srv.URL
-	srv.Close()
-
-	pn, _, pp := newProxyPanel(t)
-	sub, err := pp.AddSubscription("dead", url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rec, body := doJSONReq(t, pn, http.MethodPost, "/panel/api/subscriptions/"+sub.ID+"/sync", nil)
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("拉取失败应 502，得到 %d: %v", rec.Code, body)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// S10 回归：bind_proxy 对停用节点的语义（允许预绑定，启用后生效）
-// ---------------------------------------------------------------------------
-
-func TestBindProxyAllowsDisabledNode(t *testing.T) {
-	pn, p, pp := newProxyPanel(t)
-	disabled := pp.List()[1].ID
-	if _, err := pp.Toggle(disabled); err != nil {
-		t.Fatal(err)
-	}
-	if nv, ok := pp.NodeView(disabled); !ok || nv.Enabled {
-		t.Fatalf("fixture 应已停用: %+v ok=%v", nv, ok)
-	}
-	rec, body := doJSONReq(t, pn, http.MethodPost, "/panel/api/accounts/u1/bind_proxy", map[string]any{"proxy_id": disabled})
-	if rec.Code != http.StatusOK || body["ok"] != true {
-		t.Fatalf("停用节点应允许预绑定: code=%d body=%v", rec.Code, body)
-	}
-	if got := p.AccountProxy("u1"); got != disabled {
-		t.Fatalf("绑定未落池: %q", got)
-	}
-	// 实际出口仍是直连（停用 = 回落），但绑定意图保留；重新启用即生效。
-	if got := pp.ExitKey(disabled); got != "" {
-		t.Fatalf("停用节点的实际出口应为直连，得到 %q", got)
-	}
-	if _, err := pp.Toggle(disabled); err != nil {
-		t.Fatal(err)
-	}
-	if got := pp.ExitKey(disabled); got != disabled {
-		t.Fatalf("重新启用后实际出口应为该节点，得到 %q", got)
 	}
 }

@@ -75,8 +75,7 @@ func (c *Client) globalRegisterReq(method, url, token string, body any, base str
 // globalRegisterJSON 发注册链路请求并解外层信封（code/msg）。
 // a 决定出站 client（账号级代理池分流）；a 可为 nil（nil 回落共享 client）。
 func (c *Client) globalRegisterJSON(a *auth.Auth, req *http.Request) (code int, msg string, raw json.RawMessage, err error) {
-	client, _ := c.clientFor(a)
-	resp, err := sendAligned(client, req)
+	resp, err := c.do(req, a, false)
 	if err != nil {
 		return 0, "", nil, err
 	}

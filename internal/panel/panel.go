@@ -29,6 +29,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/credithist"
 	"github.com/misakano7545/workbuddy2api-panel/internal/httpauth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/livecfg"
+	"github.com/misakano7545/workbuddy2api-panel/internal/nodebridge"
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
@@ -89,7 +90,9 @@ type Config struct {
 	// Proxypool 代理池（账号级出站代理；nil = 代理相关接口返回 501，overview 不注入
 	// proxy 字段）。panel 同时持有 pool（绑定关系）与 proxypool（节点本体），在
 	// proxy.go 做视图合并。
-	Proxypool *proxypool.Pool
+	Proxypool *proxypool.Manager
+	// NodeBridge 机场订阅桥：把 vless/hysteria2 节点变成上游池能吃的 socks5 URL。
+	NodeBridge *nodebridge.Bridge
 	// ModelFallback 模型降级路由表（读 live 快照，支持热更）。nil = 未配置。
 	// 面板据它在限流提示里标注「已路由至 X」—— 否则用户看到「v4.1 限流」
 	// 会以为服务断了，实际请求已被自动改道到等价模型继续服务。

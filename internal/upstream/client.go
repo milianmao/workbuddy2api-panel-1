@@ -30,6 +30,7 @@ import (
 	"github.com/misakano7545/workbuddy2api-panel/internal/cst"
 	"github.com/misakano7545/workbuddy2api-panel/internal/logfmt"
 	"github.com/misakano7545/workbuddy2api-panel/internal/loginsite"
+	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/session"
 )
 
@@ -822,6 +823,10 @@ type Client struct {
 	// 与 HTTP 共享同一个 *http.Transport 实例，连接池不重复。
 	ChatHTTP *http.Client
 
+	// ProxyPool #122 账号级出站路由（nil = 未装配，全部直连）。do() 是唯一
+	// 出口：先补头形态，再交池子按 uid 选节点（随机 / 固定 / 直连）。
+	ProxyPool *proxypool.Manager
+
 	// HeaderTimeout 聊天 SSE 首字节前（响应头）超时；<=0 表示未设置（回落 HTTP.Timeout）。
 	HeaderTimeout time.Duration
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
@@ -1369,8 +1374,7 @@ func (e errReader) Read([]byte) (int, error) { return 0, e.err }
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
 // a 决定出站 client：账号绑定了代理 → 走该节点的 transport（clientFor），否则共享 client。
 func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error) {
-	client, _ := c.clientFor(a)
-	resp, err := sendAligned(client, req)
+	resp, err := c.do(req, a, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1745,8 +1749,9 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
 		doStart := time.Now()
+		// chatClient 仅用于传输层失败时清共享连接池（池化出口由 do() 内部选择）。
 		_, chatClient := c.clientFor(a)
-		resp, err := sendAligned(chatClient, req)
+		resp, err := c.do(req, a, true)
 		if timing != nil {
 			timing.Do += max(time.Since(doStart), time.Nanosecond)
 		}
@@ -2086,8 +2091,7 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	// AccessToken 加锁快照（见 auth.AccessTokenValue：keepalive 刷新在 a.mu 内改写）。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	client, _ := c.clientFor(a)
-	resp, err := sendAligned(client, req)
+	resp, err := c.do(req, a, false)
 	if err != nil {
 		return nil, err
 	}
@@ -2569,8 +2573,7 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 		ua = c.v3ProbeUA(a)
 	}
 	req.Header.Set("User-Agent", ua)
-	client, _ := c.clientFor(a)
-	resp, err := sendAligned(client, req)
+	resp, err := c.do(req, a, false)
 	if err != nil {
 		return nil, nil, err
 	}

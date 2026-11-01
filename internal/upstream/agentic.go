@@ -58,8 +58,7 @@ func (c *Client) AgenticSearch(ctx context.Context, a *auth.Auth, query string) 
 	c.ChatHeaders(req, a, "", ChatMeta{})
 	// shortcut: 用常规 client 统管整段流（Timeout 120s）——实测最慢 66s，够用；
 	// 若哪天出现更长的综述，改用 chatHTTP（无总时长）+ 自己的读超时。
-	client, _ := c.clientFor(a)
-	resp, err := sendAligned(client, req)
+	resp, err := c.do(req, a, false)
 	if err != nil {
 		return nil, err
 	}

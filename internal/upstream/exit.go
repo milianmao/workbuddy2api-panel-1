@@ -62,11 +62,18 @@ func sendAligned(client *http.Client, req *http.Request) (*http.Response, error)
 // do 是上游的「单一出站口」（他们代理池带来的收口）。本 fork 的账号级出口是
 // clientFor(a)，但上游自带的测试与探针都按 do(req, a, chat) 调用——保留同签名，
 // 让那些用例原样跑，实现仍是我们那套：按账号取 client，再走 sendAligned。
+// 出口顺序固定：先按路径补头形态（拼写 + Connection），再交 #122 代理池按 uid
+// 选节点。池子未装配（ProxyPool == nil）或 a 为空时退回原直连底座——与上游
+// do() 的分支一致，保证未启用代理池时行为零变化。
 func (c *Client) do(req *http.Request, a *auth.Auth, chat bool) (*http.Response, error) {
 	regular, chatClient := c.clientFor(a)
 	client := regular
 	if chat {
 		client = chatClient
 	}
-	return sendAligned(client, req)
+	prepared := applyOfficialHead(req)
+	if c.ProxyPool == nil || a == nil {
+		return client.Do(prepared)
+	}
+	return c.ProxyPool.Do(client, prepared, a.UID)
 }

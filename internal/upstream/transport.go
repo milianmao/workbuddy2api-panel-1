@@ -53,16 +53,15 @@ const (
 	responseHeaderTimeout = 60 * time.Second
 )
 
-// DialTimeout 导出 dialTimeout（出站建连上限的单一事实来源）。供 main 装配
-// 代理池时把同一口径注入 proxypool：节点 transport 整体替换 DialContext 后
-// 底座的 net.Dialer.Timeout 失效，建连上限必须由 proxypool 侧用 ctx 兜住。
-const DialTimeout = dialTimeout
-
 // maxIdleConns / maxIdleConnsPerHost 连接池容量（既有值，一并集中定义）。
 const (
 	maxIdleConns        = 100
 	maxIdleConnsPerHost = 20
 )
+
+// DialTimeout 导出 dialTimeout（出站建连上限的单一事实来源）。装配层
+// （代理池的节点拨号器）必须取同一常量，否则两处硬编码会漂移。
+const DialTimeout = dialTimeout
 
 // newDialer 构造出站拨号器（DialContext 的 Timeout/KeepAlive 参数集中于此，
 // 供测试回读断言）。
@@ -131,84 +130,73 @@ func NewDNSDialer(servers []string) *net.Dialer {
 // cfg 为 nil 时用最小默认配置；测试注入 InsecureSkipVerify 用自签 httptest
 // 服务器验证整条链路（生产恒 nil）。
 func newTLSDialer(d *net.Dialer, cfg *tls.Config, fp string) func(context.Context, string, string) (net.Conn, error) {
-	if d == nil {
-		return nil
-	}
-	return tlsDialFunc(d.DialContext, cfg, fp)
-}
-
-// NewTLSDialFunc 把「任意 TCP 拨号函数」升级成出站 TLS 拨号闭包（指纹复刻 +
-// 头序重排，与 newTransport 完全同源）。专供装配层：代理池节点的 transport 必须
-// 整体替换 DialContext 才能走节点出口，而 http.Transport 一旦有 DialTLSContext
-// 就**优先**走它、DialContext 对 https 完全不参与——节点绑定就会静默失效、
-// 账号从本机 IP 直连出去。所以节点侧要用同一档位重建 DialTLSContext。
-func NewTLSDialFunc(dial func(context.Context, string, string) (net.Conn, error), fp string) func(context.Context, string, string) (net.Conn, error) {
-	if dial == nil {
-		return nil
-	}
-	return tlsDialFunc(dial, nil, fp)
-}
-
-// tlsDialFunc 是 newTLSDialer / NewTLSDialFunc 的共同实现：dial 只负责拿到裸 TCP。
-func tlsDialFunc(dial func(context.Context, string, string) (net.Conn, error), cfg *tls.Config, fp string) func(context.Context, string, string) (net.Conn, error) {
-	insecure := cfg != nil && cfg.InsecureSkipVerify
-	// sniOverride 允许调用方显式指定 SNI（测试把连接指到 127.0.0.1 但仍要发
-	// 真实域名的 SNI，否则 uTLS 对 IP 地址按 RFC 不发 SNI，抓到的 ClientHello
-	// 会少一个扩展、JA3/JA4 全跑偏）。生产 cfg 恒 nil，行为不受影响。
-	sniOverride := ""
-	if cfg != nil {
-		sniOverride = cfg.ServerName
-	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		raw, err := dial(ctx, network, addr)
+		raw, err := d.DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, err
 		}
-		host, _, splitErr := net.SplitHostPort(addr)
-		if splitErr != nil {
-			host = addr
-		}
-		if sniOverride != "" {
-			host = sniOverride
-		}
-		hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
-		defer cancel()
+		return tlsHandshake(ctx, raw, addr, cfg, fp)
+	}
+}
 
-		// 复刻路径：uTLS 手搓 ClientHello。ALPN 刻意留空——官方 Node 栈就是
-		// 不带 ALPN，这与 Transport 禁 h2 的口径一致（见 newTransport 注释）。
-		if useNodeFingerprint(fp) {
-			uc := utls.UClient(raw, &utls.Config{
-				ServerName:         host,
-				InsecureSkipVerify: insecure,
-				MinVersion:         tls.VersionTLS12,
-			}, utls.HelloCustom)
-			if perr := uc.ApplyPreset(officialHelloSpec()); perr != nil {
-				raw.Close()
-				return nil, fmt.Errorf("tls fingerprint preset: %w", perr)
-			}
-			if herr := uc.HandshakeContext(hctx); herr != nil {
-				raw.Close()
-				return nil, herr
-			}
-			return newHeadOrderConn(uc), nil
-		}
+// TLSOver 在已建好的原始连接上做与直连完全相同的 TLS 握手（同一指纹档位、同一请求头重排）。
+// 代理池用它包住经代理建立的隧道：Transport 一旦配了代理或自定义 DialContext，就不再
+// 调用直连的 DialTLSContext，经代理的流量会退回 Go 原生握手；SOCKS 时更糟，直连的
+// DialTLSContext 会绕过代理直接出网。raw 由调用方建立，握手失败时由本函数关闭。
+func (c *Client) TLSOver(ctx context.Context, raw net.Conn, addr string) (net.Conn, error) {
+	return tlsHandshake(ctx, raw, addr, nil, c.TLSFingerprint)
+}
 
-		// 原生路径：crypto/tls。
-		var tc0 *tls.Config
-		if cfg != nil {
-			tc0 = cfg.Clone()
-		} else {
-			tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
+// tlsHandshake 在 raw 上按指纹档位握手，返回包了请求头重排的明文连接；失败时关闭 raw。
+func tlsHandshake(ctx context.Context, raw net.Conn, addr string, cfg *tls.Config, fp string) (net.Conn, error) {
+	insecure := cfg != nil && cfg.InsecureSkipVerify
+	// cfg.ServerName 允许调用方显式指定 SNI（测试把连接指到 127.0.0.1 但仍要发
+	// 真实域名的 SNI，否则 uTLS 对 IP 地址按 RFC 不发 SNI，抓到的 ClientHello
+	// 会少一个扩展、JA3/JA4 全跑偏）。生产 cfg 恒 nil，行为不受影响。
+	host, _, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		host = addr
+	}
+	if cfg != nil && cfg.ServerName != "" {
+		host = cfg.ServerName
+	}
+	hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+	defer cancel()
+
+	// 复刻路径：uTLS 手搓 ClientHello。ALPN 刻意留空——官方 Node 栈就是
+	// 不带 ALPN，这与 Transport 禁 h2 的口径一致（见 newTransport 注释）。
+	if useNodeFingerprint(fp) {
+		uc := utls.UClient(raw, &utls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: insecure,
+			MinVersion:         tls.VersionTLS12,
+		}, utls.HelloCustom)
+		if perr := uc.ApplyPreset(officialHelloSpec()); perr != nil {
+			raw.Close()
+			return nil, fmt.Errorf("tls fingerprint preset: %w", perr)
 		}
-		tc0.ServerName = host
-		tc0.NextProtos = nil
-		tc := tls.Client(raw, tc0)
-		if herr := tc.HandshakeContext(hctx); herr != nil {
+		if herr := uc.HandshakeContext(hctx); herr != nil {
 			raw.Close()
 			return nil, herr
 		}
-		return newHeadOrderConn(tc), nil
+		return newHeadOrderConn(uc), nil
 	}
+
+	// 原生路径：crypto/tls。
+	var tc0 *tls.Config
+	if cfg != nil {
+		tc0 = cfg.Clone()
+	} else {
+		tc0 = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	tc0.ServerName = host
+	tc0.NextProtos = nil
+	tc := tls.Client(raw, tc0)
+	if herr := tc.HandshakeContext(hctx); herr != nil {
+		raw.Close()
+		return nil, herr
+	}
+	return newHeadOrderConn(tc), nil
 }
 
 // SetDNSDialer 把拨号器挂到现役两个 http.Client 上（覆盖 DialContext 与
@@ -283,9 +271,8 @@ func newTransport() *http.Transport {
 	}
 }
 
-// NewTransport 构造共享出站 Transport 的导出包装（单一事实来源仍是 newTransport）。
-// 供 main 装配代理池：proxypool 以它为底构造 per-proxy transport（替换 DialContext
-// 走节点），连接层加固参数（禁 h2 / TLS 握手超时 / 短 keepalive）原样继承。
+// NewTransport 暴露 newTransport()：装配层（登录代理、代理池底座）需要一个与直连
+// 同档的 *http.Transport，但不想要整个 Client。
 func NewTransport() *http.Transport { return newTransport() }
 
 // closeIdler 实现该接口的 RoundTripper 支持清空空闲连接池（*http.Transport、

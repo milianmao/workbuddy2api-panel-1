@@ -579,8 +579,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 			fmt.Printf("[dbg] %s: %s\n", k, req.Header.Get(k))
 		}
 	}
-	client, _ := c.clientFor(a)
-	resp, err := sendAligned(client, req)
+	resp, err := c.do(req, a, false)
 	if err != nil {
 		return "", "", err
 	}
