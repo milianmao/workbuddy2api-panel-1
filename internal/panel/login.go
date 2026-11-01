@@ -12,11 +12,13 @@ package panel
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -94,8 +96,41 @@ func (e *loginEnvelopeError) Error() string {
 	return fmt.Sprintf("code=%d msg=%s", e.Code, e.Msg)
 }
 
-// loginHTTP 设备授权专用 client：短超时、无 cookie（每请求携带 state，无会话态）。
-var loginHTTP = &http.Client{Timeout: 30 * time.Second}
+// loginHTTP 设备授权专用 client：无 cookie（每请求携带 state，无会话态）。
+//
+// ⚠️ 为什么不能直接用默认 transport（2026-10-24 实案，处置与
+// internal/upstream/transport.go 同源）：
+// 默认 transport 会经 ALPN 协商出 HTTP/2，而本网络下容器 DNS（127.0.0.11）偶发
+// 「server misbehaving」并留下半死连接——半死 h2 流被复用时会一直等响应头，直到
+// 客户端**总超时**才报错：
+//
+//	auth state (upstream 0): Post "https://copilot.tencent.com/v2/plugin/auth/state?platform=CLI":
+//	context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+//
+// 用户可见表现：国内版一直拿不到授权链接（国际版当时恰好没撞上抖动，看起来正常）；
+// 登录轮询走的 auth/token 是同一个 client，同样会卡——浏览器侧明明已登录成功，
+// 网关却迟迟检测不到，面板像卡死。
+//
+// 两层防护（与 newTransport 一致）：
+//   - TLS 层：空 TLSNextProto 真正禁 h2（必须 make 而非 nil；只设
+//     ForceAttemptHTTP2=false 无效，ALPN 仍会协商出 h2，见 transport.go 注释）；
+//   - 连接层：DialContext 8s 建连 + 15s keepalive、TLS 握手 8s、响应头 15s，
+//     让单次尝试在 ~15s 内失败而不是拖满 30s 总超时，配合下方 doJSON 重试。
+var loginHTTP = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   8 * time.Second,
+			KeepAlive: 15 * time.Second,
+		}).DialContext,
+		TLSNextProto:          make(map[string]func(string, *tls.Conn) http.RoundTripper),
+		TLSHandshakeTimeout:   8 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		MaxIdleConns:          16,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       60 * time.Second,
+	},
+}
 
 // commonHeaders 设备码端点的公共头族（真机形态，见 loginsite.Site.EndpointHeaders）。
 //
@@ -157,14 +192,54 @@ type apiEnvelope struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// doJSON 发一次 JSON 请求并解信封。site 决定头族与 UA（真机形态，见 commonHeaders）；
-// extra 为端点差异头（state 的 x-device-token / 哨兵、account 的 Bearer 等），
-// 在公共头之后覆盖写入，nil 表示只发公共头。
+// loginAttempts 单次登录步骤的传输层重试次数（只对「一个 HTTP 响应都没拿到」的
+// 失败重试）。理由见 loginHTTP：容器 DNS 偶发 server misbehaving，单发失败不该让
+// 用户从头再点一遍；且三步都可安全重发（auth/state 重签一个 state、旧 state 由
+// loginTTL 回收；token/account 是只读查询）。已拿到响应（业务错误如 token 的
+// 11217 "login ing"、或 HTTP 4xx/5xx）绝不重试——那是确定结果，重试只会拖慢轮询。
+const loginAttempts = 3
+
+// doJSON 发一次 JSON 请求并解信封，遇纯传输失败按 loginAttempts 重试。
+// site 决定头族与 UA（真机形态，见 commonHeaders）；extra 为端点差异头
+// （state 的 x-device-token / 哨兵、account 的 Bearer 等），在公共头之后覆盖写入，
+// nil 表示只发公共头。
 //
 // client 是本次登录会话的出口（指定代理时由 loginProxyClient 建，nil = 默认登录出口）；
-// ctx 来自 HTTP 请求，调用方取消时同步终止上游请求，不留悬挂连接。
+// ctx 来自 HTTP 请求，调用方取消时同步终止上游请求，不留悬挂连接。body 先落地成
+// []byte，重试才能重放（调用方本来就只传几百字节的小 JSON）。
 func doJSON(ctx context.Context, client *http.Client, method, fullURL string, extra map[string]string, body io.Reader, site loginSite) (json.RawMessage, int, error) {
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
+	var payload []byte
+	if body != nil {
+		b, err := io.ReadAll(io.LimitReader(body, 1<<20))
+		if err != nil {
+			return nil, 0, err
+		}
+		payload = b
+	}
+	var lastErr error
+	for attempt := 0; attempt < loginAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 400 * time.Millisecond)
+		}
+		data, status, err := doJSONOnce(ctx, client, method, fullURL, extra, payload, site)
+		if err == nil {
+			return data, status, nil
+		}
+		if status != 0 {
+			return nil, status, err // 上游已应答：确定结果，不重试
+		}
+		lastErr = err
+	}
+	return nil, 0, lastErr
+}
+
+// doJSONOnce 单次尝试（不做重试）。
+func doJSONOnce(ctx context.Context, client *http.Client, method, fullURL string, extra map[string]string, body []byte, site loginSite) (json.RawMessage, int, error) {
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, rdr)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -215,6 +290,12 @@ func loginProxyClient(raw string) (*http.Client, error) {
 	}
 	tr := upstream.NewTransport()
 	tr.Proxy = http.ProxyURL(u)
+	// 底座现在带 DialTLSContext（出站指纹 + 头序，见 upstream/transport.go）：
+	// http.Transport 一旦有它就**优先**走它，DialContext/Proxy 对 https 完全不参与——
+	// 留着等于这次登录从本机 IP 直连出去，登录出口代理形同虚设。这里清空，让标准库
+	// 回落「Proxy 隧道 + DialContext + 原生 TLS」：登录链路拿不到指纹复刻（凭
+	// 证接口不是风控主战场），但出口代理必须真的生效。
+	tr.DialTLSContext = nil
 	return &http.Client{Transport: tr, Timeout: loginHTTP.Timeout}, nil
 }
 

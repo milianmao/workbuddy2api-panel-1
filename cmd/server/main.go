@@ -192,6 +192,18 @@ func main() {
 	up.AccountQuotaCheck = p.CheckDailyQuota
 	up.AccountCreditObserver = p.RecordDailyCredit
 
+	// 出站 ClientHello 指纹档位：默认 node（复刻官方 Node/OpenSSL 的 JA3/JA4）。
+	// 配 go 才退回 crypto/tls 原生形态——唯一用途是指纹导致握手异常时紧急回滚。
+	if err := up.SetTLSFingerprint(cfg.Upstream.TLSFingerprint); err != nil {
+		log.Fatalf("CONFIG: %v", err)
+	}
+	if up.TLSFingerprint == upstream.TLSFingerprintNode {
+		log.Printf("[upstream] TLS 指纹复刻已启用（JA3 %s / JA4 %s）",
+			upstream.OfficialJA3MD5, upstream.OfficialJA4)
+	} else {
+		log.Printf("[upstream] TLS 指纹为原生 Go 形态（JA3/JA4 与官方客户端不一致）")
+	}
+
 	// 出站 DNS（config dns_servers / WB2A_DNS）：显式指定解析器，绕开系统配置。
 	// 典型场景是 Android（无 /etc/resolv.conf，Go 解析器退回 [::1]:53 全域名失败）
 	// 与本地 DNS 被污染。未配置时保持系统解析器，行为零变化。
@@ -228,6 +240,12 @@ func main() {
 	// 底座的 net.Dialer.Timeout 不参与，必须由 proxypool 侧用 ctx 兜住（否则黑洞
 	// 地址要等系统 TCP 重传窗口才失败）。
 	proxypoolSvc.SetNodeDialTimeout(upstream.DialTimeout)
+	// 节点 transport 的 TLS 层也接在节点拨号之上：底座的 DialTLSContext 闭的是
+	// 直连 dialer，不换掉就等于 https 请求绕过节点。指纹档位与共享 transport
+	// 同一来源（up.TLSFingerprint），运行期切档新构造的节点 transport 才生效。
+	proxypoolSvc.SetTLSDialer(func(dial func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return upstream.NewTLSDialFunc(dial, up.TLSFingerprint)
+	})
 	// 删除/同步移除的节点 → ①自动解绑其上账号（池侧批量清绑定）②淘汰 upstream 侧
 	// 按节点 ID 缓存的 client 条目（让失效 transport 及早释放）。
 	proxypoolSvc.SetUnbindCallback(func(ids []string) []string {

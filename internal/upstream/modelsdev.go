@@ -229,7 +229,7 @@ func (f *modelsDevFetcher) fetchDoc(client *http.Client, baseOverride string) {
 		log.Printf("WARN: [upstream] models.dev fetch: build request: %v", err)
 		return
 	}
-	resp, err := client.Do(req)
+	resp, err := sendAligned(client, req)
 	if err != nil {
 		log.Printf("WARN: [upstream] models.dev fetch failed (silent fallback to 1M): %v", err)
 		return

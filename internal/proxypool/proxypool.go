@@ -158,6 +158,9 @@ type Pool struct {
 	fp   string                 // proxies.json 路径（main 由 stateSibling 推出）
 	base func() *http.Transport // transport 底座构造器（upstream.NewTransport 注入）
 
+	// tlsDial TLS 拨号工厂（main 注入，见 SetTLSDialer）。
+	tlsDial TLSDialFactory
+
 	mu    sync.Mutex
 	subs  map[string]*Subscription
 	nodes map[string]*Node

@@ -92,7 +92,7 @@ func (c *Client) agentTool(ctx context.Context, a *auth.Auth, path string, body 
 	req.Header.Set("Content-Type", "application/json")
 	c.ChatHeaders(req, a, "", ChatMeta{})
 	client, _ := c.clientFor(a)
-	resp, err := client.Do(req)
+	resp, err := sendAligned(client, req)
 	if err != nil {
 		return nil, err
 	}

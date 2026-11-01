@@ -34,6 +34,19 @@ import (
 // 由 main 注入值，本常量仅作测试/裸用时的安全网）。
 const DefaultNodeDialTimeout = 10 * time.Second
 
+// TLSDialFactory 把「裸 TCP 拨号函数」升级成出站 TLS 拨号闭包（指纹 + 头序）。
+// 类型定义放这里、由 main 用 upstream.NewTLSDialFunc 注入：本包不 import
+// internal/upstream（分层硬约束），只能靠装配层把实现递进来。
+type TLSDialFactory func(dial func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// SetTLSDialer 注入 TLS 拨号工厂（main 装配期调用）。未注入时节点 transport 会
+// 清空 DialTLSContext（回落原生 TLS），也绝不保留一条直连路径。
+func (p *Pool) SetTLSDialer(f TLSDialFactory) {
+	p.mu.Lock()
+	p.tlsDial = f
+	p.mu.Unlock()
+}
+
 // TransportFor 返回绑定某节点的出站 transport；id 空 / 节点不存在 / 已停用 /
 // 底座缺失 / 节点解析失败 → nil（调用方回落直连）。结果按节点缓存；节点内容更新
 // （同 tag 换服务器）、删除、停用时由调用方失效缓存（CloseIdleConnections）。
@@ -60,7 +73,19 @@ func (p *Pool) TransportFor(id string) *http.Transport {
 		return nil
 	}
 	tr := p.base()
-	tr.DialContext = dialViaNode(proxy, p.nodeDialTimeout())
+	nd := dialViaNode(proxy, p.nodeDialTimeout())
+	tr.DialContext = nd
+	// DialTLSContext 必须一起换成节点版：http.Transport 有它时优先走它，
+	// DialContext 对 https 根本不参与——留着底座那份等于节点绑定静默失效、
+	// 账号从本机 IP 直连出去（风控按出口 IP 分组，这类形态最容易被连坐）。
+	// 工厂未注入时宁可清空（标准库回落 DialContext + 原生 TLS），也不留直连路径。
+	if tr.DialTLSContext != nil {
+		if p.tlsDial != nil {
+			tr.DialTLSContext = p.tlsDial(nd)
+		} else {
+			tr.DialTLSContext = nil
+		}
+	}
 	p.trCache[id] = tr
 	return tr
 }
