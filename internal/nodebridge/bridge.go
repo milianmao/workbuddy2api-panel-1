@@ -205,6 +205,9 @@ func (b *Bridge) Start() error {
 		}
 	}
 	log.Printf("nodebridge: %d node(s) listening on 127.0.0.1:%d+", len(b.byURL), basePort)
+	// 立刻落盘：ports/history 只有写回文件，重启后端口才稳定、绑定迁移才有据可查
+	// （启动路径不经过 Sync，不写就等于每次冷启动都重新分配）。
+	go b.saveAsync()
 	return nil
 }
 
