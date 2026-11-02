@@ -39,6 +39,8 @@ docs/*
 *.md
 !README.md
 !AGENTS.md
+# AGENTS 之外唯一要进库的 md：装进 CI Hermes 的技能（AutoBot 写 PR 正文时读它）
+!.github/autobot-skills/**/*.md
 
 # 项目知识库（knowledge-base-builder 产出，下游 Skill 直接按路径读取）：
 # 必须显式反忽略——上面的 *.md 会连 docs/project-note/*.md 一起吞掉。
