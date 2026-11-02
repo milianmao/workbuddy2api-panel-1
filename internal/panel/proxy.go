@@ -86,7 +86,11 @@ func (p *Panel) proxiesList(w http.ResponseWriter, r *http.Request) {
 			subs = append(subs, subItem{ID: s.ID, Name: s.Name, URL: s.URL, Count: n, LastSyncAt: s.LastSync})
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "proxies": items, "subs": subs})
+	realms := snap.Realms
+	if realms == nil {
+		realms = map[string]proxypool.Binding{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "proxies": items, "subs": subs, "realms": realms})
 }
 
 // proxiesImport POST /panel/api/proxies {text} → {ok,total,imported,skipped,errors}。
@@ -311,6 +315,49 @@ func (p *Panel) reconcileBridgePool() proxypool.ReconcileResult {
 			res.Removed, len(res.Remapped), len(res.Unbound))
 	}
 	return res
+}
+
+// realmProxy PUT /panel/api/proxies/realm/{realm}
+// body {"mode":"direct"} | {"mode":"random"} | {"mode":"fixed","proxy_id":"..."}
+// 分区默认出口（issue #39 P3）：账号没显式绑定时按 realm 取它。
+func (p *Panel) realmProxy(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Proxypool == nil {
+		writeErr(w, http.StatusNotImplemented, "proxypool not available")
+		return
+	}
+	realm := r.PathValue("realm")
+	if realm != "cn" && realm != "global" {
+		writeErr(w, http.StatusBadRequest, "realm must be cn or global")
+		return
+	}
+	var body struct {
+		ProxyID string `json:"proxy_id"`
+		Mode    string `json:"mode"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	bind := proxypool.Binding{Mode: "random"}
+	switch body.Mode {
+	case "random":
+	case "direct":
+		bind = proxypool.Binding{Mode: "direct"}
+	case "fixed":
+		if body.ProxyID == "" {
+			writeErr(w, http.StatusBadRequest, "proxy_id required")
+			return
+		}
+		bind = proxypool.Binding{Mode: "fixed", ProxyID: body.ProxyID}
+	default:
+		writeErr(w, http.StatusBadRequest, "mode must be direct, random or fixed")
+		return
+	}
+	if err := p.cfg.Proxypool.BindRealm(realm, bind); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // accountBindProxy POST /panel/api/accounts/{uid}/bind_proxy

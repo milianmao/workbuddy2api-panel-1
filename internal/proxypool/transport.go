@@ -234,9 +234,9 @@ func (c *bufferedConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 // Do selects once before Client.Do so redirects and the response body keep the route.
 // The caller's Client is copied; shared clients and live transports are never mutated.
-func (m *Manager) Do(client *http.Client, req *http.Request, uid string) (*http.Response, error) {
+func (m *Manager) Do(client *http.Client, req *http.Request, uid, realm string) (*http.Response, error) {
 	m.mu.Lock()
-	n, proxied, err := m.selectLocked(uid)
+	n, proxied, err := m.selectLocked(uid, realm)
 	var tr *http.Transport
 	if err == nil && proxied {
 		tr, err = m.transportLocked(n)

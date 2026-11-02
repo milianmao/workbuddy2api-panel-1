@@ -1088,6 +1088,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </div>
       </div>
 
+      <!-- 分区默认出口（issue #39 P3）：账号没在账号池里单独绑定时取这里。
+           查表顺序 账号绑定 > 分区默认 > 随机池 > 直连 —— 想「不走代理池」就在这里选直连。 -->
+      <div class="box">
+        <header>
+          <h3>分区默认出口 <span class="hint">账号没单独绑定时取这里；账号绑定优先</span></h3>
+        </header>
+        <div class="state">查表顺序：<b>账号绑定 → 分区默认 → 随机池 → 直连</b>。选「直连」= 该域所有未绑定账号直接从本机出口出去，不经过代理池；选「默认随机」= 在池内健康节点里挑。</div>
+        <div class="realm-fields" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;padding:0 16px 14px">
+          <label>国内版（cn）<select id="proxyRealmCn"></select></label>
+          <label>国际版（global）<select id="proxyRealmGlobal"></select></label>
+        </div>
+      </div>
+
     </section>
 
     <!-- 任务中心：后台自动任务的进展与待办扫描/队列共用一张卡、一个列表

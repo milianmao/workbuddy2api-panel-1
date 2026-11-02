@@ -5494,6 +5494,7 @@ if ($('btnEventExport')) $('btnEventExport').onclick = () => {
 
 /* 代理池模块状态（proxyui_test.go 的切片锚点，删改前先看该测试）。 */
 let proxyData = [];       // 最近一次 GET /panel/api/proxies 的节点列表（绑定弹窗复用）
+let proxyRealms = {};     // 分区默认出口（cn/global → Binding），账号没绑定时按它走
 let proxySubData = [];    // 同一响应里的订阅列表
 let proxySel = new Set(); // 已勾选的节点 id（照 accSel 模式）
 let proxyLast = [];       // 最近一次渲染用的节点数组（全选 / 批量操作的范围）
@@ -5552,6 +5553,7 @@ function renderProxies(list) {
     Array.from(proxySel).forEach(i => { if (!alive.has(i)) proxySel.delete(i); });
   }
   proxyLast = rows;
+  renderRealmExits(rows);
   const tb = $('proxyBody');
   if (!tb) return;
   if (!rows.length) {
@@ -5595,9 +5597,45 @@ async function loadProxies(quiet) {
     const d = await api('proxies');
     proxyData = d.proxies || [];
     proxySubData = d.subs || [];
+    proxyRealms = d.realms || {};
     renderSubs(proxySubData);
     renderProxies(proxyData);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
+}
+
+/* renderRealmExits 分区默认出口（issue #39 P3）：账号没显式绑定时按 realm 取这里。
+   选项集与绑定弹窗同源（默认随机 / 直连 / 每个节点）；被引用的节点已删时回落显示
+   「默认随机」——不能让下拉停在某个不存在的 id 上，那会让人以为出口还在。
+   查表顺序：账号绑定 > 分区默认 > 随机池 > 直连。 */
+function renderRealmExits(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  const opts = '<option value="random">默认随机（池内挑一个）</option>' +
+    '<option value="direct">直连（本机出口）</option>' +
+    list.map(p => '<option value="' + esc(p.id) + '">' + esc((p.tag || p.id) + ' · ' + (p.enabled ? '启用' : '停用')) + '</option>').join('');
+  for (const pair of [['proxyRealmCn', 'cn'], ['proxyRealmGlobal', 'global']]) {
+    const sel = $(pair[0]);
+    if (!sel) continue;
+    const b = proxyRealms[pair[1]] || { mode: 'random' };
+    const want = b.mode === 'fixed' ? b.proxy_id : (b.mode || 'random');
+    sel.innerHTML = opts;
+    sel.value = want;
+    if (sel.value !== want) sel.value = 'random';
+  }
+}
+
+/* 保存分区默认出口：选中值直接映射成 Binding（random / direct / fixed+proxy_id）。 */
+for (const pair of [['proxyRealmCn', 'cn'], ['proxyRealmGlobal', 'global']]) {
+  const sel = $(pair[0]);
+  if (!sel) continue;
+  sel.onchange = async ev => {
+    const v = ev.target.value;
+    const body = (v === 'random' || v === 'direct') ? { mode: v } : { mode: 'fixed', proxy_id: v };
+    try {
+      await api('proxies/realm/' + pair[1], { method: 'PUT', body: JSON.stringify(body) });
+      toast((pair[1] === 'cn' ? '国内版' : '国际版') + '默认出口已保存', 'ok');
+    } catch (e) { toast('保存失败：' + e.message, 'err'); }
+    await loadProxies(true);
+  };
 }
 
 /* importResultToast 导入/同步类响应的统一汇总：导入 N / 跳过 M（errors 展示前两条）。 */
@@ -5984,6 +6022,7 @@ async function openProxyBind(uids) {
     const d = await api('proxies');
     proxyData = d.proxies || [];
     proxySubData = d.subs || [];
+    proxyRealms = d.realms || {};
     renderProxies(proxyData);
   } catch (e) {
     // 旧缓存照旧渲染（仍可选直连、仍可保存），但必须把失败原因摆出来。

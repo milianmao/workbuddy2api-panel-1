@@ -556,3 +556,36 @@ func TestProxyUIActionGridAuto(t *testing.T) {
 		t.Fatal("节点表停用行缺少等价 .off 样式")
 	}
 }
+
+// 分区默认出口（issue #39 P3）：账号没绑定时按 realm 走。这组断言钉三件事 ——
+// ① 下拉里必须能选「直连」（就是本次需求的入口：「不走代理池」）；
+// ② 没有 realm 默认时显示「默认随机」，不能停在一个不存在的 id 上；
+// ③ 选中值映射成 Binding 的三种形状（random / direct / fixed+proxy_id）打到 PUT。
+func TestProxyUIRealmExits(t *testing.T) {
+	proxyUIRunNode(t, proxyUIHarness+`
+(async () => {
+  await ctx.loadProxies(true);
+  const cn = els['proxyRealmCn'], gl = els['proxyRealmGlobal'];
+  assert.ok(cn && gl, '分区默认出口两个下拉都要在');
+  assert.ok(cn.innerHTML.includes('直连（本机出口）'), '必须能选直连，得到 ' + cn.innerHTML.slice(0, 80));
+  assert.ok(cn.innerHTML.includes('HK-01'), '选项集应含池内节点');
+  assert.strictEqual(cn.value, 'random', '没有 realm 默认时应显示默认随机，得到 ' + cn.value);
+
+  calls.length = 0;
+  await cn.onchange({ target: { value: 'direct' } });
+  const put = calls.filter(c => c.url && c.url.includes('/proxies/realm/cn'));
+  assert.deepStrictEqual(put.map(c => [c.method, c.url, JSON.parse(c.body)]),
+    [['PUT', '/panel/api/proxies/realm/cn', { mode: 'direct' }]],
+    '选直连应为 PUT realm/cn {mode:direct}，得到 ' + JSON.stringify(put));
+  assert.ok(calls.some(c => c.toast && c.toast.indexOf('国内版') >= 0), '保存成功要 toast 国内版');
+
+  calls.length = 0;
+  await gl.onchange({ target: { value: 'p2' } });
+  const put2 = calls.filter(c => c.url && c.url.includes('/proxies/realm/global'));
+  assert.deepStrictEqual(put2.map(c => [c.method, JSON.parse(c.body)]),
+    [['PUT', { mode: 'fixed', proxy_id: 'p2' }]],
+    '选节点应为 PUT realm/global {mode:fixed}，得到 ' + JSON.stringify(put2));
+  console.log('proxy realm exits passed');
+})().catch(e => { console.error('FAIL:', e && e.message); process.exit(1); });
+`)
+}
