@@ -352,6 +352,9 @@ type ReconcileResult struct {
 	Removed  int               `json:"removed"`
 	Remapped map[string]string `json:"remapped,omitempty"`
 	Unbound  []string          `json:"unbound,omitempty"`
+	// Skipped 非空表示整池都被判成陈旧，几乎只可能是桥换了端口集合而不是真换了
+	// 订阅；这时删完会把所有绑定一起解掉，代价远大于留几条僵尸行，故主动放弃。
+	Skipped string `json:"skipped,omitempty"`
 }
 
 // Reconcile 让池跟随真实节点集合（keep = 当前真实存在的代理 URL）。
@@ -390,6 +393,10 @@ func (m *Manager) Reconcile(keep map[string]bool, tagOf func(url string) string)
 				tagID[tag] = n.ID
 			}
 		}
+	}
+	if len(stale) > 0 && len(stale) == len(d.Nodes) {
+		res.Skipped = "整个池都被判成陈旧（桥换了端口集合？），本次不对账"
+		return res, nil
 	}
 	changed := len(stale) > 0
 	uids := make([]string, 0, len(d.Bindings))

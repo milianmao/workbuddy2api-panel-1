@@ -115,3 +115,32 @@ func idOfURL(t *testing.T, m *Manager, u string) string {
 	t.Fatalf("池里没有 %s", u)
 	return ""
 }
+
+// 整池都被判成陈旧 = 桥换了端口集合（重启/漂移），不是真换了订阅。
+// 这时不许删：删完会把所有绑定一起解掉，代价远大于留着几条僵尸行。
+func TestReconcileSkipsWhenWholePoolLooksStale(t *testing.T) {
+	m, err := New(filepath.Join(t.TempDir(), "pool.json"), nil, nil)
+	if err != nil {
+		t.Fatalf("new pool: %v", err)
+	}
+	const a = "socks5://127.0.0.1:39130"
+	if _, err := m.Import(a + "\nsocks5://127.0.0.1:39131"); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if err := m.Bind("u1", Binding{Mode: "fixed", ProxyID: idOfURL(t, m, a)}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	res, err := m.Reconcile(map[string]bool{"socks5://127.0.0.1:39999": true}, func(string) string { return "X" })
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res.Skipped == "" {
+		t.Fatalf("整池陈旧时应跳过，得到 %+v", res)
+	}
+	if n := len(m.Snapshot().Proxies); n != 2 {
+		t.Fatalf("跳过时不得删节点，剩 %d", n)
+	}
+	if _, ok := m.Snapshot().Bindings["u1"]; !ok {
+		t.Fatalf("跳过时不得解绑")
+	}
+}

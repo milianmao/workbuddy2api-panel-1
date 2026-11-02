@@ -302,6 +302,10 @@ func (p *Panel) reconcileBridgePool() proxypool.ReconcileResult {
 		log.Printf("panel: proxy pool reconcile failed: %v", err)
 		return proxypool.ReconcileResult{}
 	}
+	if res.Skipped != "" {
+		log.Printf("panel: proxy pool reconcile skipped: %s", res.Skipped)
+		return res
+	}
 	if res.Removed > 0 || len(res.Remapped) > 0 || len(res.Unbound) > 0 {
 		log.Printf("panel: pool reconcile removed=%d remapped=%d unbound=%d",
 			res.Removed, len(res.Remapped), len(res.Unbound))

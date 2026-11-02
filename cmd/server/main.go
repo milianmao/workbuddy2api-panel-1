@@ -265,6 +265,8 @@ func main() {
 			// 这里按桥当前真实的出口集对账，并顺手把悬空的绑定迁到同名新节点。
 			if rec, err := proxySvc.Reconcile(nodeBridge.Keep(), nodeBridge.TagForURL); err != nil {
 				log.Printf("WARN: [nodebridge] 代理池对账失败: %v", err)
+			} else if rec.Skipped != "" {
+				log.Printf("WARN: [nodebridge] 代理池对账跳过: %s", rec.Skipped)
 			} else if rec.Removed > 0 || len(rec.Remapped) > 0 || len(rec.Unbound) > 0 {
 				log.Printf("[nodebridge] 代理池对账：删除陈旧节点 %d 个，迁移绑定 %d 个，解绑 %d 个",
 					rec.Removed, len(rec.Remapped), len(rec.Unbound))

@@ -71,6 +71,10 @@ type legacyDisk struct {
 	// History 本地 socks5 URL → 节点名的历史（订阅换了身份后，旧 URL 只剩这里能反查）。
 	// 旧版本不认这个字段：Go 解未知字段是忽略，回滚只丢历史，不会解析失败。
 	History map[string]histEntry `json:"history,omitempty"`
+	// Ports 节点 ID → 本机 socks5 端口。重启后必须复用同一个，否则 URL 变、
+	// 池里节点身份跟着变、绑定全部悬空（2026-11-02 就这么翻过一次车）。
+	// 旧版本忽略这个字段，回滚只是回到「按身份哈希重新分配」。
+	Ports map[string]int `json:"ports,omitempty"`
 }
 
 // histEntry 一条 URL→节点名的历史记录。
@@ -109,7 +113,9 @@ type Bridge struct {
 	byURL map[string]*entry
 	// hist 是 URL→节点名的历史：机场换一批节点后端口全变，绑定迁移只能靠
 	// 「旧 URL 当初叫什么名字」找回同名新节点。
-	hist   map[string]histEntry
+	hist map[string]histEntry
+	// ports 上次实际用的本地端口（node id → port），重启按它复用。
+	ports  map[string]int
 	closed bool
 	client *http.Client
 }
@@ -122,6 +128,7 @@ func Load(path string) (*Bridge, error) {
 		nodes: map[string]*entry{},
 		byURL: map[string]*entry{},
 		hist:  map[string]histEntry{},
+		ports: map[string]int{},
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -149,6 +156,11 @@ func Load(path string) (*Bridge, error) {
 				s.ID = id
 			}
 			b.subs[id] = s
+		}
+	}
+	for id, port := range disk.Ports {
+		if port > 0 {
+			b.ports[id] = port
 		}
 	}
 	for u, h := range disk.History {
@@ -204,24 +216,35 @@ func (b *Bridge) startLocked(e *entry, used map[int]bool) error {
 	if err != nil {
 		return err
 	}
-	// 端口由节点身份哈希决定：同一节点重启后 URL 不变，上游池认成同一节点。
-	h := fnv.New32a()
-	fmt.Fprintf(h, "%s|%s|%d|%s", e.Type, e.Server, e.Port, e.Tag)
-	start := basePort + int(h.Sum32()%spanPorts)
+	// 端口优先复用上次落盘的那个：URL 稳定 = 池里节点身份稳定 = 绑定不会因为一次
+	// 重启就指向不存在的节点。哈希只作为首次分配/端口被占时的兜底。
 	var ln net.Listener
-	for i := 0; i < spanPorts; i++ {
-		port := basePort + (start-basePort+i)%spanPorts
-		if used[port] {
-			continue
+	if pref := b.ports[e.ID]; pref >= basePort && pref < basePort+spanPorts && !used[pref] {
+		if l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(pref))); err == nil {
+			ln = l
+			used[pref] = true
+			e.lport = pref
 		}
-		l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
-		if err != nil {
-			continue
+	}
+	if ln == nil {
+		// 首次分配按节点身份哈希：同一节点每次冷启动都拿到同一个端口。
+		h := fnv.New32a()
+		fmt.Fprintf(h, "%s|%s|%d|%s", e.Type, e.Server, e.Port, e.Tag)
+		start := basePort + int(h.Sum32()%spanPorts)
+		for i := 0; i < spanPorts; i++ {
+			port := basePort + (start-basePort+i)%spanPorts
+			if used[port] {
+				continue
+			}
+			l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+			if err != nil {
+				continue
+			}
+			ln = l
+			used[port] = true
+			e.lport = port
+			break
 		}
-		ln = l
-		used[port] = true
-		e.lport = port
-		break
 	}
 	if ln == nil {
 		return fmt.Errorf("no free local port for socks5 bridge")
@@ -231,6 +254,7 @@ func (b *Bridge) startLocked(e *entry, used map[int]bool) error {
 	e.url = "socks5://" + ln.Addr().String()
 	e.Enabled = true
 	b.byURL[e.url] = e
+	b.ports[e.ID] = e.lport
 	b.recordTagLocked(e.url, e.Tag)
 	go b.serve(ln, p, e.Tag)
 	return nil
@@ -565,6 +589,15 @@ func (b *Bridge) Sync(ctx context.Context, id string) (int, error) {
 		drop = append(drop, e)
 		delete(b.nodes, nid)
 		delete(b.byURL, e.url)
+		delete(b.ports, nid)
+	}
+	// 先关旧监听再开新监听：否则新节点算出的端口会被「还没关的旧监听」占着，
+	// net.Listen 失败后退到下一位，整批端口漂移 —— 池里旧 URL 全成僵尸的元凶。
+	for _, e := range drop {
+		if e.ln != nil {
+			e.ln.Close()
+			e.ln = nil
+		}
 	}
 	used := map[int]bool{}
 	for _, e := range b.byURL {
@@ -572,19 +605,19 @@ func (b *Bridge) Sync(ctx context.Context, id string) (int, error) {
 			used[e.lport] = true
 		}
 	}
-	for _, e := range b.nodes {
+	newIDs := make([]string, 0, len(b.nodes))
+	for nid, e := range b.nodes {
 		if e.SubID == id && e.ln == nil && e.Enabled {
-			if err := b.startLocked(e, used); err != nil {
-				log.Printf("nodebridge: restart node %s failed: %v", e.Tag, err)
-			}
+			newIDs = append(newIDs, nid)
+		}
+	}
+	sort.Strings(newIDs) // 端口分配的确定性前提（与 Start 同一顺序）
+	for _, nid := range newIDs {
+		if err := b.startLocked(b.nodes[nid], used); err != nil {
+			log.Printf("nodebridge: restart node %s failed: %v", b.nodes[nid].Tag, err)
 		}
 	}
 	s.LastSync = time.Now().Unix()
-	for _, e := range drop {
-		if e.ln != nil {
-			e.ln.Close()
-		}
-	}
 	go b.saveAsync()
 	log.Printf("nodebridge: subscription %s synced: total=%d added=%d removed=%d", id, len(maps), added, len(drop))
 	return added, nil
@@ -609,6 +642,11 @@ func (b *Bridge) save() {
 		hist[u] = h
 	}
 	disk.History = hist
+	ports := make(map[string]int, len(b.ports))
+	for id, port := range b.ports {
+		ports[id] = port
+	}
+	disk.Ports = ports
 	path := b.path
 	b.mu.Unlock()
 	raw, err := json.MarshalIndent(disk, "", " ")
