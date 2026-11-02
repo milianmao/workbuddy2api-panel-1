@@ -186,7 +186,6 @@ func Load(path string) (*Bridge, error) {
 // Start 为所有已启用节点打开本地 socks5 监听。
 func (b *Bridge) Start() error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	ids := make([]string, 0, len(b.nodes))
 	for id := range b.nodes {
 		ids = append(ids, id)
@@ -205,9 +204,10 @@ func (b *Bridge) Start() error {
 		}
 	}
 	log.Printf("nodebridge: %d node(s) listening on 127.0.0.1:%d+", len(b.byURL), basePort)
-	// 立刻落盘：ports/history 只有写回文件，重启后端口才稳定、绑定迁移才有据可查
-	// （启动路径不经过 Sync，不写就等于每次冷启动都重新分配）。
-	go b.saveAsync()
+	b.mu.Unlock()
+	// 立刻落盘（同步）：ports/history 只有写回文件，重启后端口才稳定、绑定迁移才有
+	// 据可查（启动路径不经过 Sync）。异步写会和进程退出/测试清理抢同一个临时文件。
+	b.save()
 	return nil
 }
 
