@@ -757,14 +757,15 @@ async function saveDailyQuota() {
    数据来自 overview 的 proxy_id / proxy_tag / proxy_ok；旧数据缺字段时一律按未绑定显示。 */
 function proxyCell(s) {
   if (!s || !s.proxy_tag) {
-    return '<span class="proxy-random" title="未绑定节点：在池内健康节点间随机出口（不是直连）">随机</span>';
+    return '<span class="proxy-random" title="未绑定节点，且所在分区没有默认出口：在池内健康节点间随机出口（不是直连）">随机</span>';
   }
   const bad = s.proxy_ok === false;
   const tip = bad
-    ? '绑定的节点已停用，请求会直接失败（fail-closed，不会回落随机或直连）；请重新绑定，或到「代理池」重新启用该节点'
-    : '当前出口代理：' + s.proxy_tag;
+    ? '出口节点已停用，请求会直接失败（fail-closed，不会回落随机或直连）；请重新绑定，或到「代理池」重新启用该节点'
+    : (s.proxy_realm ? '来自「分区默认出口」（账号本身没单独绑定）：' : '当前出口代理：') + s.proxy_tag;
+  const badge = s.proxy_realm ? ' <span class="tag mute" title="来自代理池页的「分区默认出口」">默认</span>' : '';
   return '<span class="proxy-tag' + (bad ? ' bad' : '') + '" title="' + esc(tip) + '">' +
-    esc(s.proxy_tag) + (bad ? ' 已停用' : '') + '</span>';
+    esc(s.proxy_tag) + (bad ? ' 已停用' : '') + badge + '</span>';
 }
 
 /* 账号池「多选 + 排序」的模块状态。

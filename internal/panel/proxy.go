@@ -422,12 +422,9 @@ type proxyView struct {
 
 // accountProxyViews 批量解出账号的 proxy_tag/proxy_ok（overview 注入用）。
 // 绑定关系在上游池里（bindings[uid]），节点名经桥反查。
-func (p *Panel) accountProxyViews() map[string]proxyView {
-	views := map[string]proxyView{}
-	if p.cfg.Proxypool == nil {
-		return views
-	}
-	snap := p.cfg.Proxypool.Snapshot()
+// proxyNodeTags 节点 id → 面板显示名 / 是否启用。桥能反查就用机场里的节点名，
+// 反查不到（陈旧 URL）退回池里的原始名。
+func (p *Panel) proxyNodeTags(snap proxypool.Snapshot) (map[string]string, map[string]bool) {
 	tags := map[string]string{}
 	enabled := map[string]bool{}
 	for _, v := range snap.Proxies {
@@ -439,6 +436,12 @@ func (p *Panel) accountProxyViews() map[string]proxyView {
 		}
 		tags[v.ID], enabled[v.ID] = name, v.Enabled
 	}
+	return tags, enabled
+}
+
+func (p *Panel) accountProxyViews(snap proxypool.Snapshot) map[string]proxyView {
+	views := map[string]proxyView{}
+	tags, enabled := p.proxyNodeTags(snap)
 	for uid, b := range snap.Bindings {
 		switch b.Mode {
 		case "direct":
@@ -458,8 +461,13 @@ func (p *Panel) accountProxyViews() map[string]proxyView {
 func (p *Panel) overviewAccounts() []accountOverview {
 	list := p.cfg.Pool.List()
 	views := map[string]proxyView{}
+	var snap proxypool.Snapshot
+	var tags map[string]string
+	var enabled map[string]bool
 	if p.cfg.Proxypool != nil {
-		views = p.accountProxyViews()
+		snap = p.cfg.Proxypool.Snapshot()
+		views = p.accountProxyViews(snap)
+		tags, enabled = p.proxyNodeTags(snap)
 	}
 	var credits map[string]usage.DayCredits
 	if p.cfg.Usage != nil {
@@ -475,6 +483,21 @@ func (p *Panel) overviewAccounts() []accountOverview {
 			item.ProxyTag = v.ProxyTag
 			item.ProxyOK = v.ProxyOK
 			item.ProxyID = v.ProxyID
+		}
+		// 没有账号级绑定 → 按 realm 默认出口显示（issue #39 P3）。不补这一段，
+		// 「分区默认 = 直连」的账号在面板上依旧写「随机」，又是一次文案骗人。
+		if item.ProxyTag == "" {
+			if rb, ok := snap.Realms[item.Realm]; ok {
+				switch rb.Mode {
+				case "direct":
+					item.ProxyTag, item.ProxyOK, item.ProxyRealm = "直连", true, item.Realm
+				case "fixed":
+					if tag, ok := tags[rb.ProxyID]; ok {
+						item.ProxyTag, item.ProxyOK = tag, enabled[rb.ProxyID]
+						item.ProxyRealm = item.Realm
+					}
+				}
+			}
 		}
 		if p.cfg.Usage != nil {
 			if dc, ok := credits[st.UID]; ok {
@@ -495,8 +518,10 @@ func (p *Panel) overviewAccounts() []accountOverview {
 // accountOverview overview 账号行：pool.Status 内联展开 + 代理注入字段 + 今日积分。
 type accountOverview struct {
 	pool.Status
-	ProxyTag         string   `json:"proxy_tag,omitempty"`
-	ProxyOK          bool     `json:"proxy_ok"`
+	ProxyTag string `json:"proxy_tag,omitempty"`
+	ProxyOK  bool   `json:"proxy_ok"`
+	// ProxyRealm 非空表示这行的出口来自 realm 默认（账号本身没绑定）：前端加「默认」角标。
+	ProxyRealm       string   `json:"proxy_realm,omitempty"`
 	CreditsUsedToday *float64 `json:"credits_used_today,omitempty"`
 }
 
