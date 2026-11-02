@@ -227,7 +227,9 @@ func (p *Panel) subscriptionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	added := p.importBridgeNodes()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": sub.ID, "imported": added})
+	rec := p.reconcileBridgePool()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": sub.ID, "imported": added,
+		"removed": rec.Removed, "remapped": len(rec.Remapped), "unbound": len(rec.Unbound)})
 }
 
 // subscriptionSync POST /panel/api/subscriptions/{id}/sync。
@@ -242,7 +244,9 @@ func (p *Panel) subscriptionSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	added := p.importBridgeNodes()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imported": added})
+	rec := p.reconcileBridgePool()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imported": added,
+		"removed": rec.Removed, "remapped": len(rec.Remapped), "unbound": len(rec.Unbound)})
 }
 
 // subscriptionDelete DELETE /panel/api/subscriptions/{id}。
@@ -281,7 +285,28 @@ func (p *Panel) importBridgeNodes() int {
 	if added > 0 {
 		log.Printf("panel: bridge imported %d node(s) into proxy pool", added)
 	}
+	p.reconcileBridgePool()
 	return added
+}
+
+// reconcileBridgePool 让池跟订阅当前的真实出口集对齐：删掉已消失的节点，并把
+// 指向它们的 fixed 绑定按节点名迁到同名新节点（迁不了就解绑回随机池）。
+// 触发点：订阅新建/同步之后 —— Import 只增不删，不清就会留下永远探不通的僵尸行。
+func (p *Panel) reconcileBridgePool() proxypool.ReconcileResult {
+	var res proxypool.ReconcileResult
+	if p.cfg.NodeBridge == nil || p.cfg.Proxypool == nil {
+		return res
+	}
+	res, err := p.cfg.Proxypool.Reconcile(p.cfg.NodeBridge.Keep(), p.cfg.NodeBridge.TagForURL)
+	if err != nil {
+		log.Printf("panel: proxy pool reconcile failed: %v", err)
+		return proxypool.ReconcileResult{}
+	}
+	if res.Removed > 0 || len(res.Remapped) > 0 || len(res.Unbound) > 0 {
+		log.Printf("panel: pool reconcile removed=%d remapped=%d unbound=%d",
+			res.Removed, len(res.Remapped), len(res.Unbound))
+	}
+	return res
 }
 
 // accountBindProxy POST /panel/api/accounts/{uid}/bind_proxy

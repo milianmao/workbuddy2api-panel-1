@@ -751,14 +751,17 @@ async function saveDailyQuota() {
 }
 
 /* proxyCell 账号行的「代理」格：绑定且有效 → 节点名小标签；绑定但节点被**停用**
-   （proxy_ok=false）→ 警示色 + 「已停用」，title 说明处置办法；未绑定 → 灰字「直连」。
-   注意「已删除」不会走到这里：删节点时后端经回调解绑，账号回落直连（proxy_tag 为空）。
-   数据来自 overview 的 proxy_id / proxy_tag / proxy_ok；旧数据缺字段时一律按直连显示。 */
+   （proxy_ok=false）→ 警示色 + 「已停用」，title 说明处置办法；未绑定 → 灰字「随机」。
+   「随机」不是直连：未绑定 = 在上游 selectLocked 的 random 分支里挑健康节点，只有显式
+   mode:"direct" 才是本机出口。删节点时后端经回调解绑，账号回落随机（proxy_tag 为空）。
+   数据来自 overview 的 proxy_id / proxy_tag / proxy_ok；旧数据缺字段时一律按未绑定显示。 */
 function proxyCell(s) {
-  if (!s || !s.proxy_tag) return '<span class="proxy-direct">直连</span>';
+  if (!s || !s.proxy_tag) {
+    return '<span class="proxy-random" title="未绑定节点：在池内健康节点间随机出口（不是直连）">随机</span>';
+  }
   const bad = s.proxy_ok === false;
   const tip = bad
-    ? '绑定的节点已停用，当前实际直连；请重新绑定，或到「代理池」重新启用该节点'
+    ? '绑定的节点已停用，请求会直接失败（fail-closed，不会回落随机或直连）；请重新绑定，或到「代理池」重新启用该节点'
     : '当前出口代理：' + s.proxy_tag;
   return '<span class="proxy-tag' + (bad ? ' bad' : '') + '" title="' + esc(tip) + '">' +
     esc(s.proxy_tag) + (bad ? ' 已停用' : '') + '</span>';
@@ -5652,7 +5655,7 @@ $('subBody').onclick = ev => {
   if (!b) return;
   return proxyBusyRun(async () => {
     const id = b.dataset.s, act = b.dataset.act;
-    if (act === 'del' && !confirm('删除该订阅？其导入的节点会一并移除，已绑定这些节点的账号将自动改回直连。')) return;
+    if (act === 'del' && !confirm('删除该订阅？其导入的节点会一并移除，已绑定这些节点的账号将自动改回随机出口。')) return;
     b.disabled = true;
     try {
       if (act === 'sync') {
@@ -5698,7 +5701,7 @@ $('proxyBody').onclick = ev => {
   if (!b) return;
   return proxyBusyRun(async () => {
     const id = b.dataset.p, a = b.dataset.a;
-    if (a === 'del' && !confirm('删除该节点？已绑定它的账号会自动改回直连。')) return;
+    if (a === 'del' && !confirm('删除该节点？已绑定它的账号会自动改回随机出口。')) return;
     b.disabled = true;
     try {
       if (a === 'test') {
@@ -5764,7 +5767,7 @@ $('btnProxyDisableSel').onclick = () => proxyBusyRun(() => batchProxyToggle(fals
 $('btnProxyDelSel').onclick = () => proxyBusyRun(async () => {
   if (!proxySel.size) { toast('先在表头勾选节点（或点全选）', ''); return; }
   const n = proxySel.size;
-  if (!confirm('删除勾选的 ' + n + ' 个节点？已绑定它们的账号将自动改回直连，且不可恢复。')) return;
+  if (!confirm('删除勾选的 ' + n + ' 个节点？已绑定它们的账号将自动改回随机出口，且不可恢复。')) return;
   let ok = 0, fail = 0;
   for (const id of Array.from(proxySel)) {
     try { await api('proxies/' + encodeURIComponent(id), { method: 'DELETE' }); ok++; }
@@ -5855,16 +5858,16 @@ function renderProxyBindList() {
   const enabled = (proxyData || []).filter(p => p && p.enabled);
   const alive = new Set(enabled.map(p => p.id));
   const pre = bindPreselect(bindTargets);
-  // 预选值只能是「直连」或列表里真实存在的启用节点；绑定的节点已停用（不在列表）时
-  // 回落直连，并用提示说清 —— 此时确认保存就是解绑，用户得知道自己要做什么。
+  // 预选值只能是「不绑定（随机出口）」或列表里真实存在的启用节点；绑定的节点已停用
+  // （不在列表）时回落「不绑定」，并用提示说清 —— 此时保存就是解绑，用户得知道。
   const pick = pre.id && alive.has(pre.id) ? pre.id : '';
-  // mixed（多号当前绑定不一致）时**什么都不预选**：连「直连」也不勾 —— 否则用户点
+  // mixed（多号当前绑定不一致）时**什么都不预选**：连「不绑定」也不勾 —— 否则用户点
   // 保存就把这批账号一起解绑了，正是要避免的静默解绑。
   const none = !!pre.mixed;
   const view = pbView();
   const rows = ['<label class="pb-row dir"><input type="radio" name="pbpick" value=""' + (!none && !pick ? ' checked' : '') + '>' +
-    '<span class="pb-name"><span class="pb-tag">直连（不使用代理）</span>' +
-    '<span class="pb-sub">不经过任何节点，直接用本机出口</span></span></label>'];
+    '<span class="pb-name"><span class="pb-tag">不绑定（随机出口）</span>' +
+    '<span class="pb-sub">不钉死节点，自动在池内健康节点间分散</span></span></label>'];
   for (const p of view) {
     const ms = Number(p.latency_ms || 0);
     const fails = Number(p.fails || 0);
@@ -5883,14 +5886,14 @@ function renderProxyBindList() {
         (busy ? '测速中' : '测速') + '</button></label>');
   }
   if (!enabled.length) {
-    rows.push('<div class="hint">当前没有启用状态的节点 —— 可先到「代理池」添加/启用节点，或选择直连。</div>');
+    rows.push('<div class="hint">当前没有启用状态的节点 —— 可先到「代理池」添加/启用节点，或选择「不绑定（随机出口）」。</div>');
   } else if (!view.length) {
     rows.push('<div class="pb-empty">没有匹配「' + esc(String(pbFilter || '')) + '」的节点；清空过滤词可看全部 ' + enabled.length + ' 个。</div>');
   }
   if (pre.mixed) {
     rows.push('<div class="hint" id="proxyBindHint">所选账号当前代理不一致，已取消预选；请重新选择。</div>');
   } else if (pre.id && !pick) {
-    rows.push('<div class="hint" id="proxyBindHint">当前绑定的节点不在启用列表里（可能已停用）；保存即改为直连。</div>');
+    rows.push('<div class="hint" id="proxyBindHint">当前绑定的节点不在启用列表里（可能已停用）；保存即改为不绑定（随机出口）。</div>');
   }
   box.innerHTML = rows.join('');
   const cnt = $('pbCount');
@@ -6006,7 +6009,7 @@ $('btnProxyBindSave').onclick = async () => {
   // 都是无 checked，但语义完全不同（前者是漏选，后者是要解绑）。直接提交会把
   // 这批账号**静默解绑**，所以这里要求用户显式点一下。
   if (!sel) {
-    if (err) { err.textContent = '请先选择一个节点，或选「直连（不使用代理）」再保存'; err.hidden = false; }
+    if (err) { err.textContent = '请先选择一个节点，或选「不绑定（随机出口）」再保存'; err.hidden = false; }
     return;
   }
   if (err) err.hidden = true;
@@ -6014,8 +6017,8 @@ $('btnProxyBindSave').onclick = async () => {
   const unbindN = bindTargets.filter(u => bindCurrentOf(u)).length;
   if (!pid && unbindN) {
     const q = bindTargets.length > 1
-      ? '将为 ' + unbindN + ' 个账号解绑（改走直连）。确认？'
-      : '将为该账号解绑（改走直连）。确认？';
+      ? '将为 ' + unbindN + ' 个账号解绑（改走随机出口）。确认？'
+      : '将为该账号解绑（改走随机出口）。确认？';
     if (!confirm(q)) return;
   }
   bindBusy = true;
@@ -6029,7 +6032,7 @@ $('btnProxyBindSave').onclick = async () => {
     }
     toast(pid
       ? '已为 ' + ok + ' 个账号绑定代理' + (fail ? '，失败 ' + fail + ' 个' : '')
-      : '已为 ' + ok + ' 个账号解绑（直连）' + (fail ? '，失败 ' + fail + ' 个' : ''), fail ? 'err' : 'ok');
+      : '已为 ' + ok + ' 个账号解绑（随机出口）' + (fail ? '，失败 ' + fail + ' 个' : ''), fail ? 'err' : 'ok');
     if ($('proxyVeil')) $('proxyVeil').classList.remove('on');
   } finally {
     bindBusy = false;

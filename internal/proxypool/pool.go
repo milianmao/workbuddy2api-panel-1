@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -344,6 +345,104 @@ func (m *Manager) Import(text string) ([]ImportResult, error) {
 		}
 	}
 	return results, nil
+}
+
+// ReconcileResult 汇报一次「池 vs 真实节点集合」的对账结果。
+type ReconcileResult struct {
+	Removed  int               `json:"removed"`
+	Remapped map[string]string `json:"remapped,omitempty"`
+	Unbound  []string          `json:"unbound,omitempty"`
+}
+
+// Reconcile 让池跟随真实节点集合（keep = 当前真实存在的代理 URL）。
+//
+// 为什么需要它：Import 只增不删（上游语义），而订阅桥的本地监听端口由节点身份
+// 哈希决定 —— 机场改名/换 IP 后同一个节点会以新 URL 出现，旧 URL 既不健康也不会
+// 被复用，会永久留在池里（面板上表现为一堆 127.0.0.1:39xxx 僵尸行，探测白发）。
+//
+// 顺手把指向被删节点的 fixed 绑定按节点名迁移到同名新节点：迁移不了就解绑回随机池。
+// 因为 selectLocked 对失效的 fixed 是 fail-closed（宁可不发也不悄悄下宿主 IP），
+// 留着一条指向已消失节点的绑定等于把这个账号彻底卡死。
+func (m *Manager) Reconcile(keep map[string]bool, tagOf func(url string) string) (ReconcileResult, error) {
+	res := ReconcileResult{}
+	if len(keep) == 0 { // 桥没起来时不敢删：keep 空 ≠ 全删
+		return res, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d := m.copyLocked()
+	stale := map[string]bool{}
+	staleURL := map[string]string{}
+	live := map[string]node{}
+	tagID := map[string]string{}
+	for _, n := range d.Nodes {
+		if !keep[n.URL] {
+			stale[n.ID] = true
+			staleURL[n.ID] = n.URL
+			continue
+		}
+		live[n.ID] = n
+		if tagOf == nil {
+			continue
+		}
+		if tag := strings.TrimSpace(tagOf(n.URL)); tag != "" {
+			if _, dup := tagID[tag]; !dup {
+				tagID[tag] = n.ID
+			}
+		}
+	}
+	changed := len(stale) > 0
+	uids := make([]string, 0, len(d.Bindings))
+	for uid := range d.Bindings {
+		uids = append(uids, uid)
+	}
+	sort.Strings(uids)
+	for _, uid := range uids {
+		b := d.Bindings[uid]
+		if b.Mode != "fixed" {
+			continue
+		}
+		if _, ok := live[b.ProxyID]; ok {
+			continue
+		}
+		tag := ""
+		if tagOf != nil {
+			tag = strings.TrimSpace(tagOf(staleURL[b.ProxyID]))
+		}
+		if nid, ok := tagID[tag]; ok && tag != "" {
+			d.Bindings[uid] = Binding{Mode: "fixed", ProxyID: nid}
+			if res.Remapped == nil {
+				res.Remapped = map[string]string{}
+			}
+			res.Remapped[uid] = nid
+			changed = true
+			continue
+		}
+		delete(d.Bindings, uid)
+		res.Unbound = append(res.Unbound, uid)
+		changed = true
+	}
+	if !changed {
+		return res, nil
+	}
+	if len(stale) > 0 {
+		kept := make([]node, 0, len(live))
+		for _, n := range d.Nodes {
+			if stale[n.ID] {
+				continue
+			}
+			kept = append(kept, n)
+		}
+		d.Nodes = kept
+		res.Removed = len(stale)
+	}
+	if err := m.commitLocked(d); err != nil {
+		return res, err
+	}
+	for id := range stale {
+		m.resetLocked(id)
+	}
+	return res, nil
 }
 
 func (m *Manager) Update(id string, in Input) error {

@@ -133,7 +133,7 @@ func TestProxyUIBindDialog(t *testing.T) {
   const list = els['proxyBindList'].innerHTML;
   assert.ok(list.includes('name="pbpick"'), '应渲染 pbpick 单选组: ' + list);
   assert.ok(list.includes('value=""'), '应有「直连」选项');
-  assert.ok(list.includes('直连（不使用代理）'), '直连文案应出现');
+  assert.ok(list.includes('不绑定（随机出口）'), '未绑定文案应出现');
   assert.ok(list.includes('value="p1"') && list.includes('HK-01'), '启用节点 p1 应进列表: ' + list);
   assert.ok(list.includes('value="p2"'), '启用节点 p2 应进列表');
   assert.ok(!list.includes('value="p3"'), '停用节点不得进绑定列表');
@@ -199,10 +199,10 @@ const tdCount = (tb.innerHTML.match(/<td/g) || []).length / 2;
 assert.strictEqual(tdCount, thCount, '账号表列数不一致：thead ' + thCount + ' vs 数据行 ' + tdCount);
 assert.ok(tb.innerHTML.includes('data-a="proxy"'), '行内应有「代理」按钮');
 
-// 未绑定 → 灰字「直连」。
+// 未绑定 → 灰字「随机」（不是直连：未绑定走随机出口）。
 ctx.renderAccounts([{ uid: 'a', credits: 5, credits_total: 10 }]);
-assert.ok(tb.innerHTML.includes('proxy-direct'), '未绑定应渲染 proxy-direct');
-assert.ok(tb.innerHTML.includes('直连'), '未绑定应显示「直连」');
+assert.ok(tb.innerHTML.includes('proxy-random'), '未绑定应渲染 proxy-random');
+assert.ok(tb.innerHTML.includes('随机'), '未绑定应显示「随机」');
 assert.ok(!tb.innerHTML.includes('proxy-tag'), '未绑定不应渲染 proxy-tag');
 
 // 绑定且有效 → 节点名小标签（无警示字样）。
@@ -249,7 +249,7 @@ func TestProxyUIBatchBindLoop(t *testing.T) {
   assert.ok(calls.some(c => c.loadOverview !== undefined), '完成后应刷新 overview');
   assert.ok(calls.some(c => c.toast && c.toast.includes('3')), '应 toast 汇总成功数');
 
-  // 解绑：选「直连」（value=""）→ body 为空 proxy_id。
+  // 解绑：选「不绑定（随机出口）」（value=""）→ body 为空 proxy_id。
   calls.length = 0;
   pickValue = '';
   await ctx.openProxyBind(['u1']);
@@ -257,7 +257,7 @@ func TestProxyUIBatchBindLoop(t *testing.T) {
   const unbinds = calls.filter(c => c.url && c.url.includes('/bind_proxy'));
   assert.strictEqual(unbinds.length, 1, '解绑也应逐 uid 调 bind_proxy');
   assert.strictEqual(unbinds[0].body, '{"proxy_id":""}', '解绑 body 应为空 proxy_id');
-  assert.ok(calls.some(c => c.toast && c.toast.includes('直连')), '解绑 toast 应说明直连');
+  assert.ok(calls.some(c => c.toast && c.toast.includes('随机出口')), '解绑 toast 应说明随机出口');
   console.log('proxy batch bind loop passed');
 })().catch(e => { console.error('FAIL:', e && e.message); process.exit(1); });
 `)
@@ -330,18 +330,18 @@ function checkedValues(html) {
   assert.strictEqual(els['proxyBindErr'].hidden, false, '未选择时应显示错误提示');
   assert.ok(/请先选择一个节点/.test(els['proxyBindErr'].textContent), '错误文案应提示先选择');
 
-  // 未绑定过的账号 → 预选直连。
+  // 未绑定过的账号 → 预选「不绑定」。
   ctx.overviewData.accounts.push({ uid: 'u9', nickname: '新号' });
   await ctx.openProxyBind(['u9']);
   assert.deepStrictEqual(checkedValues(els['proxyBindList'].innerHTML), [''],
-    '未绑定账号应预选直连，得到 ' + els['proxyBindList'].innerHTML);
+    '未绑定账号应预选不绑定，得到 ' + els['proxyBindList'].innerHTML);
 
-  // 绑定节点已停用（不在启用列表）→ 回落直连并说明「保存即改为直连」。
+  // 绑定节点已停用（不在启用列表）→ 回落「不绑定」并说明「保存即改为不绑定」。
   ctx.overviewData.accounts.push({ uid: 'u8', nickname: '停用号', proxy_id: 'p3', proxy_tag: 'OFF-01', proxy_ok: false });
   await ctx.openProxyBind(['u8']);
   assert.deepStrictEqual(checkedValues(els['proxyBindList'].innerHTML), [''],
-    '已停用节点的账号应回落直连');
-  assert.ok(els['proxyBindList'].innerHTML.includes('保存即改为直连'), '应提示保存等于改直连');
+    '已停用节点的账号应回落不绑定');
+  assert.ok(els['proxyBindList'].innerHTML.includes('保存即改为不绑定'), '应提示保存等于改成不绑定');
   console.log('proxy bind preselect passed');
 })().catch(e => { console.error('FAIL:', e && e.message); process.exit(1); });
 `)

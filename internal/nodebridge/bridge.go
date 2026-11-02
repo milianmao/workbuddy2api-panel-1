@@ -68,6 +68,15 @@ type legacyDisk struct {
 	Saved json.RawMessage        `json:"saved"`
 	Subs  map[string]*Sub        `json:"subs"`
 	Nodes map[string]*legacyNode `json:"nodes"`
+	// History 本地 socks5 URL → 节点名的历史（订阅换了身份后，旧 URL 只剩这里能反查）。
+	// 旧版本不认这个字段：Go 解未知字段是忽略，回滚只丢历史，不会解析失败。
+	History map[string]histEntry `json:"history,omitempty"`
+}
+
+// histEntry 一条 URL→节点名的历史记录。
+type histEntry struct {
+	Tag string `json:"tag"`
+	At  int64  `json:"at"`
 }
 
 // Meta 节点元信息（面板列表用）。
@@ -93,11 +102,14 @@ type entry struct {
 
 // Bridge 订阅节点 → 本地 socks5 出口。
 type Bridge struct {
-	mu     sync.Mutex
-	path   string
-	subs   map[string]*Sub
-	nodes  map[string]*entry // node id → entry
-	byURL  map[string]*entry
+	mu    sync.Mutex
+	path  string
+	subs  map[string]*Sub
+	nodes map[string]*entry // node id → entry
+	byURL map[string]*entry
+	// hist 是 URL→节点名的历史：机场换一批节点后端口全变，绑定迁移只能靠
+	// 「旧 URL 当初叫什么名字」找回同名新节点。
+	hist   map[string]histEntry
 	closed bool
 	client *http.Client
 }
@@ -109,6 +121,7 @@ func Load(path string) (*Bridge, error) {
 		subs:  map[string]*Sub{},
 		nodes: map[string]*entry{},
 		byURL: map[string]*entry{},
+		hist:  map[string]histEntry{},
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -138,8 +151,16 @@ func Load(path string) (*Bridge, error) {
 			b.subs[id] = s
 		}
 	}
+	for u, h := range disk.History {
+		if h.Tag != "" {
+			b.hist[u] = h
+		}
+	}
 	for id, n := range disk.Nodes {
 		if n == nil || n.Raw == nil {
+			continue
+		}
+		if infoOnlyTag(n.Tag) { // 机场套餐文案行，不是能用的出口
 			continue
 		}
 		if n.ID == "" {
@@ -210,6 +231,7 @@ func (b *Bridge) startLocked(e *entry, used map[int]bool) error {
 	e.url = "socks5://" + ln.Addr().String()
 	e.Enabled = true
 	b.byURL[e.url] = e
+	b.recordTagLocked(e.url, e.Tag)
 	go b.serve(ln, p, e.Tag)
 	return nil
 }
@@ -350,6 +372,60 @@ func (b *Bridge) URLOf(id string) (string, bool) {
 	return e.url, true
 }
 
+// Keep 当前活节点的 URL 集合（代理池对账用：集合之外的池节点都是陈旧条目）。
+func (b *Bridge) Keep() map[string]bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make(map[string]bool, len(b.byURL))
+	for u, e := range b.byURL {
+		if e.Enabled {
+			out[u] = true
+		}
+	}
+	return out
+}
+
+// TagForURL 节点名反查：活节点优先，其次查历史（订阅换身份后旧 URL 只剩历史）。
+// 供 proxypool.Reconcile 把「绑定在已消失 URL 上的账号」迁到同名的新节点。
+func (b *Bridge) TagForURL(u string) string {
+	if u == "" {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if e, ok := b.byURL[u]; ok {
+		return e.Tag
+	}
+	return b.hist[u].Tag
+}
+
+// recordTagLocked 记 URL→节点名（调用方持 b.mu）。上限 4000，超了按时间淘汰最旧
+// 的一批 —— 真正需要的只有相邻两次换订阅之间那一小段历史。
+func (b *Bridge) recordTagLocked(u, tag string) {
+	if u == "" || tag == "" {
+		return
+	}
+	if b.hist == nil {
+		b.hist = map[string]histEntry{}
+	}
+	if old, ok := b.hist[u]; ok && old.Tag == tag {
+		return
+	}
+	b.hist[u] = histEntry{Tag: tag, At: time.Now().Unix()}
+	const maxHist = 4000
+	if len(b.hist) <= maxHist {
+		return
+	}
+	keys := make([]string, 0, len(b.hist))
+	for k := range b.hist {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return b.hist[keys[i]].At < b.hist[keys[j]].At })
+	for _, k := range keys[:len(keys)-maxHist+maxHist/10] {
+		delete(b.hist, k)
+	}
+}
+
 // Subs 订阅列表（按名称排序，输出稳定）。
 func (b *Bridge) Subs() []Sub {
 	b.mu.Lock()
@@ -464,6 +540,9 @@ func (b *Bridge) Sync(ctx context.Context, id string) (int, error) {
 		if strings.TrimSpace(tag) == "" || typ == "" || server == "" || port <= 0 {
 			continue
 		}
+		if infoOnlyTag(tag) { // 「剩余流量：1.89 TB」这类信息行永远探不通
+			continue
+		}
 		nid := nodeIDFor(typ, server, port, tag)
 		seen[nid] = true
 		if e, ok := b.nodes[nid]; ok {
@@ -525,6 +604,11 @@ func (b *Bridge) save() {
 		n := e.legacyNode
 		disk.Nodes[id] = &n
 	}
+	hist := make(map[string]histEntry, len(b.hist))
+	for u, h := range b.hist {
+		hist[u] = h
+	}
+	disk.History = hist
 	path := b.path
 	b.mu.Unlock()
 	raw, err := json.MarshalIndent(disk, "", " ")

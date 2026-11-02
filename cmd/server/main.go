@@ -261,6 +261,14 @@ func main() {
 				}
 				log.Printf("[nodebridge] 已把 %d 个机场节点注册进代理池（新增 %d）", len(res), added)
 			}
+			// 池只增不删（上游 Import 语义）：订阅换一批节点后旧 URL 会永远留在池里。
+			// 这里按桥当前真实的出口集对账，并顺手把悬空的绑定迁到同名新节点。
+			if rec, err := proxySvc.Reconcile(nodeBridge.Keep(), nodeBridge.TagForURL); err != nil {
+				log.Printf("WARN: [nodebridge] 代理池对账失败: %v", err)
+			} else if rec.Removed > 0 || len(rec.Remapped) > 0 || len(rec.Unbound) > 0 {
+				log.Printf("[nodebridge] 代理池对账：删除陈旧节点 %d 个，迁移绑定 %d 个，解绑 %d 个",
+					rec.Removed, len(rec.Remapped), len(rec.Unbound))
+			}
 		}
 		defer nodeBridge.Close()
 		if n := migrateLegacyBindings(p, proxySvc, nodeBridge); n > 0 {
