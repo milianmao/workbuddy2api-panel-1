@@ -38,7 +38,10 @@ type cockpitAccount struct {
 	// 但从别的实例搬 auths/ 时必须带上，否则企业号会被当成个人号走成长任务。
 	Realm        string `json:"realm"`
 	EnterpriseID string `json:"enterpriseId"`
-	DeviceToken  string `json:"device_token"`
+	// EnterpriseIDSnake 是 cockpit 导出的 snake_case 写法（上游 #151 的
+	// enterprise_id）；与上面的 camelCase 二选一填，导入时合并成一个值。
+	EnterpriseIDSnake string `json:"enterprise_id"`
+	DeviceToken       string `json:"device_token"`
 
 	// expiresAtSec 归一后的过期时间（Unix 秒）。cockpit 导出是毫秒、auth 文件是秒，
 	// 单位判断放在解码期做一次，导入主流程里不再出现 /1000 这种约定。
@@ -329,6 +332,12 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(nickname) == "" {
 			nickname = acc.Email
 		}
+		// 企业版判定沿用 auth.IsEnterprise 口径（上游 #151）：cockpit 导出是
+		// enterprise_id，auth 文件与登录接口是 enterpriseId，二者都认。
+		enterpriseID := strings.TrimSpace(acc.EnterpriseIDSnake)
+		if enterpriseID == "" {
+			enterpriseID = strings.TrimSpace(acc.EnterpriseID)
+		}
 
 		a := &auth.Auth{
 			AccessToken:  at,
@@ -336,7 +345,7 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt:    expiresAt,
 			Domain:       acc.Domain,
 			UID:          uid,
-			EnterpriseID: acc.EnterpriseID,
+			EnterpriseID: enterpriseID,
 			DeviceToken:  acc.DeviceToken,
 			Nickname:     nickname,
 			FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", uid)),
@@ -375,7 +384,12 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 				log.Printf("panel: import global trial uid=%s 已领", uid)
 			}
 		} else {
-			if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
+			// 企业版 / 静态 API Key 无个人成长体系：CN 签到端点对企业号直接
+			// 400 code 10001「企业账号不支持该操作」。跳过签到，但下方余额查询
+			// 照常（企业额度走 get-enterprise-user-usage 口径）。
+			if !a.SupportsPersonalGrowth() {
+				log.Printf("panel: import 跳过签到 uid=%s（企业版/API Key 无个人成长体系）", uid)
+			} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 				log.Printf("panel: import checkin uid=%s: %v", uid, err)
 			}
 		}

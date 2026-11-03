@@ -112,8 +112,7 @@ func TestProxiedHTTPSUsesTunnelAndInjectedHandshake(t *testing.T) {
 			handshakes = nil
 			mu.Unlock()
 			req, _ := http.NewRequest("GET", target.URL, nil)
-			// 本 fork 未并入分区默认出口（#39/#3），Do 没有 realm 形参。
-			resp, err := m.Do(&http.Client{Timeout: 2 * time.Second}, req, "u", "")
+			resp, err := m.Do(&http.Client{Timeout: 2 * time.Second}, req, "u", "cn")
 			if err != nil {
 				t.Fatal(err)
 			}
