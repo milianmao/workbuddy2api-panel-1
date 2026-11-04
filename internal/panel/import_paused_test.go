@@ -107,6 +107,9 @@ const ctx = {
   // 账号池域分类（国内/国际/全部）与最近一次列表是模块级状态，定义在 renderAccounts
   // 之前、也就是抽取范围之外；不注入的话 renderAccounts 一进过滤分支就 ReferenceError。
   accRealmFilter: 'all', lastAccountsList: [],
+  // 上游 e6dd088 的账号分组：这三个是 renderAccounts 里新增的模块级状态/函数，
+  // 同样在切片之外。不注入，一进筛选或重绘下拉就是 ReferenceError。
+  accGroupFilter: '', lastVisibleAccounts: [], syncGroupFilter: () => {},
 };
 vm.createContext(ctx);
 // 「今日已用」列用 fmtCredit 格式化（renderAccounts 切片外）：把真实实现一并求值，

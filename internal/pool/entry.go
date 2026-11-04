@@ -134,6 +134,9 @@ type Status struct {
 	// 「授权/session 终态，需人工 revive」，paused 是「运维临时让位」（多号轮换场景），
 	// 账号本身健康，只是暂不接流量。（吸收上游 fd835df）
 	Paused bool `json:"paused,omitempty"`
+	// Group 运维分组标签（上游 e6dd088）：纯管理维度，不参与选号 / 计费 / 鉴权，
+	// 只用于面板按组筛选与组内批量操作。空 = 未分组。见 entry.group。
+	Group string `json:"group,omitempty"`
 	// ProxyID 账号绑定的出站代理节点（proxypool.Node.ID）。"" = 直连。
 	// 只存绑定关系本身；节点名/存活状态由 proxypool 侧解出（避免池反向依赖）。
 	ProxyID string `json:"proxy_id,omitempty"`
@@ -276,7 +279,10 @@ type entry struct {
 	// hold 「新增待确认」：与 paused 正交的标记，只在 paused 时有意义。由 Hold() 置位；
 	// Resume（人工恢复选号）= 确认可用，一并清除。Revive（解冻）不清它，因此签到/保活/
 	// 一键解冻都不会把未确认的新号推进转发路径。持久化（state.json）。
-	hold   bool
+	hold bool
+	// group 运维自定义分组标签（上游 e6dd088；面板手填，纯管理维度：不参与选号 / 计费 /
+	// 鉴权，只用于面板按组筛选与组内批量操作）。空 = 未分组。持久化（state.json）。
+	group  string
 	reason string
 	// disabledAt 禁用时刻（零值 = 未禁用）。与 reason 配对：运维需要知道
 	// 「什么时候被禁的」——同样一句 401，是刚刚发生还是挂了一周，处置完全不同。
@@ -568,6 +574,8 @@ type stateAccount struct {
 	CreditsTotal     int64            `json:"credits_total,omitempty"`
 	Disabled         bool             `json:"disabled"`
 	Paused           bool             `json:"paused,omitempty"`
+	// Group 运维分组标签（上游 e6dd088）。与 Status.Group 同源，落 state.json。
+	Group string `json:"group,omitempty"`
 	// Hold 新增待确认标记（entry.hold 同源）。持久化：重启后仍须人工确认才进选号池，
 	// 否则一次容器重启就把未确认的新号放上流量。
 	Hold bool `json:"hold,omitempty"`
