@@ -213,6 +213,15 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .stat .v { font: 600 26px/1.15 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; white-space: nowrap; }
 .stat .k { color: var(--ink-3); font-size: 11.5px; margin-top: 5px; }
 .stat.good .v { color: var(--ok); } .stat.warn .v { color: var(--warn); } .stat.bad .v { color: var(--bad); }
+/* 卡内统计条（运行日志「请求记录」、余额趋势、账号池）：.stats 自带边框 / 圆角 /
+   阴影，直接放进 .box 里就成了「卡中卡」——外层那条 1px 边框和卡片自己的边框并排
+   成双线，末列还会多出一条没有内容的竖线，看着像贴错了位置。放进卡片体内时退化成
+   一条分段指标行，与下面的 .fbar 筛选栏同一套分隔线口径。 */
+.box > .stats {
+  border: 0; border-radius: 0; box-shadow: none; margin-bottom: 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.box > .stats .st, .box > .stats .stat { border-bottom: 0; }
 
 /* ── 面板块 ───────────────────────────────────────────────────────── */
 .box { background: var(--surface); border: 1px solid var(--line); border-radius: 11px; box-shadow: var(--shadow); margin-bottom: 20px; overflow: hidden; }
@@ -452,6 +461,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .qrbox svg { border-radius: 6px; }
 .state { font-size: 13px; color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
 .state.ok { color: var(--ok); } .state.err { color: var(--bad); }
+/* 卡片体内的状态行（任务中心的「新增国区账号后自动执行…」）：.state 自身没有内边距，
+   直接当 .box 的子元素会贴着卡片左边框，与 header 的 17px 缩进错位。 */
+.box > .state { padding: 12px 17px; }
 .dots::after { content: "…"; animation: blink 1.2s steps(4) infinite; }
 @keyframes blink { 0% { opacity: 1; } 50% { opacity: .3; } 100% { opacity: 1; } }
 
@@ -720,6 +732,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .vtabs button.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.22); }
   .vtabs .cnt { color: var(--ink-3); font-weight: 400; margin-left: 4px; font-variant-numeric: tabular-nums; }
   .vtabs button.on .cnt { color: var(--ink-2); }
+  /* tab 下方的分域说明行：与卡片左边缘对齐，但上下要留白，否则紧贴 tab 药丸和第一张
+     卡片，看起来像一行被挤到边上的注释。 */
+  .vtabs-note { margin: 9px 0 15px; font-size: 12px; color: var(--ink-3); }
 
   /* ── 请求记录表（运行日志）────────────────────────────────────────── */
   .acc.req { min-width: 1080px; }
@@ -858,7 +873,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 /* 请求上下文弹窗：一条消息一块，长文 pre-wrap，纵向滚动交给 .dlg .body。 */
 /* 跨账号合计：默认收起的 <details>，summary 当分隔条用（与代理池的分节同款）。 */
 .exp-total { border-top: 1px solid var(--line-soft); }
-.exp-total summary { cursor: pointer; padding: 10px 0; font-size: 12.5px; color: var(--ink-2); }
+/* 左右留 11px：与上面 .acc th / td 的内边距一致，否则 summary 的三角贴在卡片左边框上，
+   和表格里的「账号」「最近到期」两列错开一截。 */
+.exp-total summary { cursor: pointer; padding: 10px 11px; font-size: 12.5px; color: var(--ink-2); }
 .exp-total summary .note { margin-left: 8px; color: var(--ink-3); }
 #eventTableBody tr[data-ev] { cursor: pointer; }
 .ev-ctx { padding: 2px 0; display: flex; flex-direction: column; gap: 10px; }
@@ -1377,7 +1394,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button type="button" data-realm="cn">国内版</button>
           <button type="button" data-realm="global">国际版</button>
         </span>
-        <div class="note">切换以分域查看 / 编辑国内版与国际版的独立配置（域名 base 等），共享配置始终显示。</div>
+        <div class="note vtabs-note">切换以分域查看 / 编辑国内版与国际版的独立配置（域名 base 等），共享配置始终显示。</div>
         <div class="box">
           <header><h3>服务</h3><span class="grow"></span><span class="note" id="cfgPath"></span></header>
           <div class="pad">
@@ -1819,7 +1836,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <!-- reqStats：指标行容器（renderRequestMetrics 写入）。合并 #87 时新排版丢了它，
              而 loadLogs 里的 renderRequestMetrics 仍写这个 id —— 元素缺失时抛错被
              loadLogs 的 try/catch 吞掉，整块运行日志渲染不出来（只有它这一个 id 悬空）。 -->
-        <div class="stats" id="reqStats"></div>
+        <div class="stats auto" id="reqStats"></div>
         <div class="fbar" id="reqFilter">
           <input id="reqQ" type="search" placeholder="搜索 IP / UA / 模型 / 账号 / 请求 ID" aria-label="搜索请求记录">
           <select id="reqOutcome" aria-label="按结果筛选">
