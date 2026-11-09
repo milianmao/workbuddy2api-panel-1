@@ -51,12 +51,16 @@ func TestParseCockpitAccountsShapes(t *testing.T) {
 		{"扁平 camelCase", `{"uid":"u-2","accessToken":"at","refreshToken":"rt","expiresAt":1795096802}`, 1, "u-2"},
 		{"以 uid 为键的字典", `{"k1":` + accJSON + `,"k2":` + authFileJSON + `}`, 2, "777bd8bc"},
 		{"外壳里是空数组", `{"accounts":[]}`, 0, ""},
+		// 2026-11-09 现场报错的那一类：信封的值是**对象**而不是数组
+		// （`invalid json: cannot unmarshal object into []panel.cockpitAccount`）
+		{"信封里是单账号对象", `{"accounts":` + accJSON + `}`, 1, "uid-1"},
+		{"data 里是单账号 auth 文件", `{"data":` + authFileJSON + `}`, 1, "777bd8bc"},
 		{"顶层对象但对不上", `{"meta":{"version":1},"exported":true}`, -1, ""},
 		{"不是 JSON", `uid,access_token`, -1, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := parseCockpitAccounts([]byte(c.in))
+			got, err := decodeCockpitAccounts([]byte(c.in))
 			if c.want < 0 {
 				if err == nil {
 					t.Fatalf("期望报错，实际解析出 %d 个账号", len(got))
@@ -87,33 +91,53 @@ func TestParseCockpitAccountsShapes(t *testing.T) {
 // auth 文件形状带过来的 realm / 企业 id / 过期时间不能被丢掉：
 // 企业号当个人号跑成长任务会被上游一路 400，过期时间单位错了则会立刻触发 refresh。
 func TestDecodeCockpitAccountKeepsAuthFileFields(t *testing.T) {
-	acc, err := decodeCockpitAccount([]byte(authFileJSON))
+	got, err := decodeCockpitAccounts([]byte(authFileJSON))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(got) != 1 {
+		t.Fatalf("账号数 = %d，期望 1", len(got))
+	}
+	acc := got[0]
 	if acc.AccessToken != "eyJat" || acc.RefreshToken != "eyJrt" {
 		t.Fatalf("token 解析错: %q / %q", acc.AccessToken, acc.RefreshToken)
 	}
 	if acc.Realm != "cn" {
 		t.Fatalf("realm 应保留 cn，得到 %q", acc.Realm)
 	}
-	if acc.expiresAtSec != 1795096802 {
-		t.Fatalf("秒级 expiresAt 不该被当成毫秒再除：%d", acc.expiresAtSec)
+	// auth 文件写的是秒；normalizeExpiresAtMillis 必须把它放大成毫秒，再 /1000 还是原值。
+	if sec := normalizeExpiresAtMillis(acc.ExpiresAt) / 1000; sec != 1795096802 {
+		t.Fatalf("秒级 expiresAt 不该被当成毫秒再除：%d", sec)
 	}
 
 	// cockpit 导出的毫秒 expires_at 必须归一成秒，否则 ExpiresAt 会变成 6 万年后的未来。
-	ck, err := decodeCockpitAccount([]byte(accJSON))
+	ck, err := decodeCockpitAccounts([]byte(accJSON))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ck.expiresAtSec != 1893456000 {
-		t.Fatalf("毫秒 expires_at 应归一成秒 1893456000，得到 %d", ck.expiresAtSec)
+	if sec := normalizeExpiresAtMillis(ck[0].ExpiresAt) / 1000; sec != 1893456000 {
+		t.Fatalf("毫秒 expires_at 应归一成秒 1893456000，得到 %d", sec)
+	}
+}
+
+// device_token 是设备指纹基座，auth 文件带过来时必须跟着走。
+func TestImportKeepsDeviceToken(t *testing.T) {
+	in := `{"account":{"uid":"u-9","nickname":"n"},"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":1795096802,"domain":"www.codebuddy.cn","realm":"global","device_token":"dt-1"}}`
+	got, err := decodeCockpitAccounts([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].DeviceToken != "dt-1" {
+		t.Fatalf("device_token 丢了: %+v", got)
+	}
+	if got[0].Realm != "global" {
+		t.Fatalf("realm 应为 global，得到 %q", got[0].Realm)
 	}
 }
 
 // 缺字段时必须点名缺的是哪个（面板弹窗就显示这一句），不能再只报「失败」。
 func TestImportSkipReasonNamesMissingField(t *testing.T) {
-	p := New(Config{Version: "test", APIKey: "test-key", Pool: pool.New("")})
+	p := New(Config{Version: "test", APIKey: "test-key", Pool: pool.New(""), AuthDir: t.TempDir()})
 	// 只有 accessToken，没有 refreshToken / uid。
 	body := `[{"access_token":"at","domain":"www.codebuddy.cn"}]`
 	code, out := postImport(t, p, body)
@@ -146,11 +170,11 @@ func postImport(t *testing.T, p *Panel, payload string) (int, string) {
 }
 
 func TestParseCockpitAccountErrorIsActionable(t *testing.T) {
-	_, err := parseCockpitAccounts([]byte(`{"meta":{"version":1},"exported":true}`))
+	_, err := decodeCockpitAccounts([]byte(`{"meta":{"version":1},"exported":true}`))
 	if err == nil {
 		t.Fatal("对不上的对象应报错")
 	}
-	for _, want := range []string{"meta", "exported", "顶层"} {
+	for _, want := range []string{"无法识别", "账号数组"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("错误信息应包含 %q，实际: %v", want, err)
 		}
@@ -158,7 +182,7 @@ func TestParseCockpitAccountErrorIsActionable(t *testing.T) {
 }
 
 func TestImportCockpitHandlerRejectsUnparseableObject(t *testing.T) {
-	p := New(Config{Version: "test", APIKey: "test-key", Pool: pool.New("")})
+	p := New(Config{Version: "test", APIKey: "test-key", Pool: pool.New(""), AuthDir: t.TempDir()})
 	code, got := postImport(t, p, `{"meta":{"version":1},"exported":true}`)
 	if code != http.StatusBadRequest {
 		t.Fatalf("状态码 = %d，期望 400", code)
@@ -166,7 +190,7 @@ func TestImportCockpitHandlerRejectsUnparseableObject(t *testing.T) {
 	if strings.Contains(got, "cannot unmarshal") {
 		t.Fatalf("不该再回 Go 类型错误: %s", got)
 	}
-	if !strings.Contains(got, "顶层") {
+	if !strings.Contains(got, "无法识别") {
 		t.Fatalf("应给出可排查的中文提示: %s", got)
 	}
 }
