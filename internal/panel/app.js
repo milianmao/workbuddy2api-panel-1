@@ -5787,6 +5787,7 @@ function renderSubs(subs) {
       '<td class="num">' + (su.count || 0) + '</td>' +
       '<td style="color:var(--ink-3)">' + agoUnix(su.last_sync_at) + '</td>' +
       '<td class="acts"><div class="acts-inner auto">' +
+        '<button class="xs ghost" data-act="edit" data-s="' + esc(su.id) + '" title="修改订阅名称或链接（换 token 不必删了重建）">编辑</button>' +
         '<button class="xs ghost" data-act="sync" data-s="' + esc(su.id) + '" title="重新拉取订阅并更新节点">同步</button>' +
         '<button class="xs ghost danger" data-act="del" data-s="' + esc(su.id) + '" title="删除订阅并移除其导入的节点">删除</button>' +
       '</div></td></tr>';
@@ -5895,26 +5896,44 @@ function importResultToast(r, prefix) {
 }
 
 /* ── 代理池：订阅卡 ──────────────────────────────────────────────── */
-function openSubAdd() {
+/* subEditID 非空表示弹窗处于编辑态：保存走 PUT，只改名称时不重新拉取。
+   弹窗是新增/编辑共用的，标题与按钮文案跟着切换，避免「保存并导入」在改名时误导。 */
+let subEditID = '';
+function openSubAdd(sub) {
+  const editing = !!(sub && sub.id);
+  subEditID = editing ? String(sub.id) : '';
   const n = $('subNameInput'), u = $('subUrlInput'), err = $('subErr');
-  if (n) n.value = '';
-  if (u) u.value = '';
+  if (n) n.value = editing ? String(sub.name || '') : '';
+  if (u) u.value = editing ? String(sub.url || '') : '';
   if (err) err.hidden = true;
+  const title = $('subTitle');
+  if (title) title.textContent = editing ? '编辑订阅' : '添加订阅';
+  const btn = $('btnSubCreate');
+  if (btn) btn.textContent = editing ? '保存修改' : '保存并导入';
   if ($('subVeil')) $('subVeil').classList.add('on');
   if (u) u.focus();
 }
-$('btnSubAdd').onclick = openSubAdd;
-$('btnSubCancel').onclick = () => { if ($('subVeil')) $('subVeil').classList.remove('on'); };
+$('btnSubAdd').onclick = () => openSubAdd();
+$('btnSubCancel').onclick = () => { subEditID = ''; if ($('subVeil')) $('subVeil').classList.remove('on'); };
 $('btnSubCreate').onclick = async () => {
   const url = ($('subUrlInput').value || '').trim();
   const name = ($('subNameInput').value || '').trim();
   const err = $('subErr');
   if (!url) { err.textContent = '请填写订阅链接'; err.hidden = false; return; }
   err.hidden = true;
+  const editing = subEditID;
   $('btnSubCreate').disabled = true;
   try {
-    const r = await api('subscriptions', { method: 'POST', body: JSON.stringify({ name: name, url: url }) });
-    importResultToast(r, '');
+    if (editing) {
+      const r = await api('subscriptions/' + encodeURIComponent(editing), { method: 'PUT', body: JSON.stringify({ name: name, url: url }) });
+      if (r.sync_error) toast('已保存，但新链接拉取失败：' + r.sync_error, 'err');
+      else if (r.synced) toast('已保存并同步：新增 ' + (r.imported || 0) + ' 节点 / 移除 ' + (r.removed || 0) + ' / 改指向 ' + (r.remapped || 0) + ' / 解绑 ' + (r.unbound || 0) + ' 账号', r.unbound ? 'err' : 'ok');
+      else toast('已保存（链接没变，未重新拉取）', 'ok');
+      subEditID = '';
+    } else {
+      const r = await api('subscriptions', { method: 'POST', body: JSON.stringify({ name: name, url: url }) });
+      importResultToast(r, '');
+    }
     if ($('subVeil')) $('subVeil').classList.remove('on');
   } catch (e) { err.textContent = e.message; err.hidden = false; }
   finally { $('btnSubCreate').disabled = false; loadProxies(true); }
@@ -5941,6 +5960,11 @@ $('subBody').onclick = ev => {
   if (!b) return;
   return proxyBusyRun(async () => {
     const id = b.dataset.s, act = b.dataset.act;
+    if (act === 'edit') {
+      const row = (proxySubData || []).find(x => String(x.id) === String(id));
+      openSubAdd(row || { id: id, name: '', url: '' });
+      return;
+    }
     if (act === 'del' && !confirm('删除该订阅？其导入的节点会一并移除，已绑定这些节点的账号将自动改回随机出口。')) return;
     b.disabled = true;
     try {

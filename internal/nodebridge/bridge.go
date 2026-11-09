@@ -478,11 +478,20 @@ func (b *Bridge) Sub(id string) (Sub, bool) {
 
 // AddSub 新增订阅并立即拉一次。
 func (b *Bridge) AddSub(ctx context.Context, name, url string) (Sub, error) {
+	url = strings.TrimSpace(url)
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return Sub{}, fmt.Errorf("订阅地址必须是 http(s) URL")
 	}
 	id := subIDFor(url)
 	b.mu.Lock()
+	// 按 URL 去重，而不是只看 id：订阅被编辑过之后 id 与 URL 不再一一对应，
+	// 只比 id 会让同一条机场链接被加进第二遍（面板上出现两个一模一样的订阅）。
+	for _, s := range b.subs {
+		if s.URL == url {
+			b.mu.Unlock()
+			return Sub{}, fmt.Errorf("该订阅已存在")
+		}
+	}
 	if _, ok := b.subs[id]; ok {
 		b.mu.Unlock()
 		return Sub{}, fmt.Errorf("该订阅已存在")
@@ -494,6 +503,48 @@ func (b *Bridge) AddSub(ctx context.Context, name, url string) (Sub, error) {
 		return Sub{}, err
 	}
 	return *s, nil
+}
+
+// UpdateSub 改订阅名称 / 链接，返回改后的订阅与「链接是否变了」。
+//
+// **id 保持不变**：id 是订阅的身份，不是链接的指纹。换链接时如果连 id 一起换，
+// 一是订阅表里那条记录的 id 会跳（面板刷新前后对不上），二是节点的来源标记、
+// 端口记忆、以及任何按 id 记的外部状态都要跟着迁移——一次改名不值这个代价。
+// 于是 id 一旦分配就固定；链接重复由 UpdateSub / AddSub 两边按 URL 拦下来。
+//
+// 只动记录不拉取：改名不该触发网络请求，重新同步交给调用方按 urlChanged 决定。
+// name / url 传空表示不改（避免只想改一项的调用方把另一项冲掉）。
+func (b *Bridge) UpdateSub(id, name, url string) (Sub, bool, error) {
+	name = strings.TrimSpace(name)
+	url = strings.TrimSpace(url)
+	if url != "" && !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		return Sub{}, false, fmt.Errorf("订阅地址必须是 http(s) URL")
+	}
+	b.mu.Lock()
+	s, ok := b.subs[id]
+	if !ok {
+		b.mu.Unlock()
+		return Sub{}, false, fmt.Errorf("订阅不存在: %s", id)
+	}
+	changed := url != "" && url != s.URL
+	if changed {
+		for oid, o := range b.subs {
+			if oid != id && o.URL == url {
+				b.mu.Unlock()
+				return Sub{}, false, fmt.Errorf("该订阅链接已被其他订阅使用")
+			}
+		}
+	}
+	if name != "" {
+		s.Name = name
+	}
+	if url != "" {
+		s.URL = url
+	}
+	out := *s
+	b.mu.Unlock()
+	b.save()
+	return out, changed, nil
 }
 
 // DelSub 删除订阅及其节点（先关闭监听）。

@@ -253,6 +253,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/proxies/{id}/test", p.proxyTest)
 	p.mux.HandleFunc("PUT /panel/api/proxies/realm/{realm}", p.realmProxy)
 	p.mux.HandleFunc("POST /panel/api/subscriptions", p.subscriptionCreate)
+	p.mux.HandleFunc("PUT /panel/api/subscriptions/{id}", p.subscriptionUpdate)
 	p.mux.HandleFunc("POST /panel/api/subscriptions/{id}/sync", p.subscriptionSync)
 	p.mux.HandleFunc("DELETE /panel/api/subscriptions/{id}", p.subscriptionDelete)
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/bind_proxy", p.accountBindProxy)

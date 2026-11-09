@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/pool"
@@ -234,6 +235,52 @@ func (p *Panel) subscriptionCreate(w http.ResponseWriter, r *http.Request) {
 	rec := p.reconcileBridgePool()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": sub.ID, "imported": added,
 		"removed": rec.Removed, "remapped": len(rec.Remapped), "unbound": len(rec.Unbound)})
+}
+
+// subscriptionUpdate PUT /panel/api/subscriptions/{id} {name,url}。
+//
+// 以前换订阅链接只有「删了重建」一条路，而删订阅会连带移除节点、把绑定这些节点的
+// 账号打回随机出口——机场换 token 这种日常操作代价太大。这里先改记录，链接真的变了
+// 才重新拉取：只改名不会打上游，也不会重排节点端口（节点 id 与订阅无关）。
+func (p *Panel) subscriptionUpdate(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.NodeBridge == nil {
+		writeErr(w, http.StatusNotImplemented, "node bridge not available")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}
+	if err := decodeLimitedJSON(w, r, 8<<10, &req); err != nil {
+		writeDecodeErr(w, err)
+		return
+	}
+	sub, urlChanged, err := p.cfg.NodeBridge.UpdateSub(r.PathValue("id"), req.Name, req.URL)
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "不存在") {
+			status = http.StatusNotFound
+		}
+		writeErr(w, status, err.Error())
+		return
+	}
+	resp := map[string]any{"ok": true, "id": sub.ID, "name": sub.Name, "url": sub.URL, "synced": false}
+	if urlChanged {
+		if _, serr := p.cfg.NodeBridge.Sync(r.Context(), sub.ID); serr != nil {
+			// 记录已经改好并落盘了：同步失败降级成字段，别让整个保存看起来是失败的
+			// （否则用户会反复重试，而重试也不会让机场返回得动）。
+			resp["sync_error"] = serr.Error()
+		} else {
+			added := p.importBridgeNodes()
+			rec := p.reconcileBridgePool()
+			resp["synced"] = true
+			resp["imported"] = added
+			resp["removed"] = rec.Removed
+			resp["remapped"] = len(rec.Remapped)
+			resp["unbound"] = len(rec.Unbound)
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // subscriptionSync POST /panel/api/subscriptions/{id}/sync。
