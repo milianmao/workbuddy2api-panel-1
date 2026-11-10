@@ -2022,6 +2022,30 @@ function fmtBytes(bytes) {
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
   return (n / 1024 / 1024).toFixed(1) + ' MB';
 }
+/* 运行日志导出：落盘文件按区间打包成 ZIP。
+ * 用 location.href 直接触发下载而不是 fetch+blob——落盘包可能几十 MB，
+ * blob 会把整包读进内存再复制一份；href 让浏览器原生流式落盘。
+ * 失败（落盘未启用 / 区间无数据）时后端回 JSON 错误，浏览器会把它当文件下载，
+ * 所以先 HEAD 一次拿状态码，非 2xx 就读回错误文案弹出来。 */
+$('btnLogExport').onclick = async () => {
+  const days = $('logExportDays').value || '3';
+  const url = '/panel/api/logs/export?days=' + encodeURIComponent(days);
+  try {
+    const resp = await fetch(url, {method: 'HEAD'});
+    if (!resp.ok) {
+      // HEAD 不带 body，再 GET 一次拿文案（数据量很小：只有一个错误 JSON）。
+      const detail = await fetch(url).then(r => r.text()).catch(() => '');
+      let msg = 'HTTP ' + resp.status;
+      try { msg = JSON.parse(detail).error || msg; } catch (e) { }
+      alert('导出失败：' + msg);
+      return;
+    }
+    location.href = url;
+  } catch (e) {
+    alert('导出失败：' + e);
+  }
+};
+
 $('btnLogPin').onclick = () => {
   logPin = !logPin;
   $('btnLogPin').textContent = '自动滚动：' + (logPin ? '开' : '关');
@@ -2297,6 +2321,9 @@ $('cfgForm').onsubmit = async ev => {
 };
 
 /* ── 添加账号 ─────────────────────────────────────────────────────── */
+// 导入预览态的暂存：{files: File[], ready: bool, result?: 预览响应}。
+// 只活到确认导入或关闭弹窗为止；File 对象本身在浏览器里，再次 POST 时重发即可。
+let importPending = null;
 function openAdd() {
   $('addVeil').classList.add('on');
   // 重置到登录标签
@@ -2317,9 +2344,11 @@ function switchAddTab(tab) {
   $('addTabLogin').hidden = tab !== 'login';
   $('addTabImport').hidden = tab !== 'import';
   $('addTabApiKey').hidden = tab !== 'apikey';
-  // 页脚按钮随标签切：登录页「获取授权链接」、API Key 页「添加 API Key」，导入页无页脚按钮。
+  // 页脚按钮随标签切：登录页「获取授权链接」、API Key 页「添加 API Key」、
+  // 导入页「确认导入」（仅预览通过后出现，见 renderImportPreview）。
   $('btnAddApiKey').hidden = tab !== 'apikey';
   $('btnStartLogin').hidden = tab !== 'login' || loginState != null;
+  $('btnImportCommit').hidden = !(tab === 'import' && importPending && importPending.ready);
 }
 document.querySelectorAll('#addTabs .tab').forEach(b => {
   b.onclick = () => switchAddTab(b.dataset.tab);
@@ -2415,7 +2444,17 @@ async function pollLogin() {
     $('addErr').textContent = '网络中断，自动重试中（' + pollFails + '/' + POLL_MAX_FAILS + '）：' + e.message;
   }
 }
-function closeAdd() { stopPoll(); loginState = null; $('addVeil').classList.remove('on'); }
+function closeAdd() {
+  stopPoll(); loginState = null; $('addVeil').classList.remove('on');
+  // 导入预览态一并清掉：关掉弹窗再打开时不该还挂着上一次的文件和「确认导入」。
+  importPending = null;
+  $('importPreview').hidden = true;
+  $('importPreview').innerHTML = '';
+  $('btnImportCommit').hidden = true;
+  $('importDone').hidden = true;
+  $('importErr').hidden = true;
+  $('importFile').value = '';
+}
 $('btnCloseAdd').onclick = closeAdd;
 $('btnStartLogin').onclick = startAddLogin;
 
@@ -2451,46 +2490,98 @@ $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textCo
    之后因为其中一份格式不对就整批失败，是最难解释的体验。 */
 $('importFile').onchange = async () => {
   const files = Array.from($('importFile').files || []);
-  if (!files.length) return;
   $('importDone').hidden = true; $('importErr').hidden = true;
-  const h = {};
-  const k = localStorage.getItem(LS_KEY);
-  if (k) h['Authorization'] = 'Bearer ' + k;
-
-  let imported = 0, skipped = 0, failedFile = 0;
-  const notes = [];  // 失败文件 + 被跳过账号的原因，最后一起列出来
-  for (const [i, file] of files.entries()) {
-    $('importDone').hidden = false;
-    $('importDone').textContent = '正在导入 ' + (i + 1) + ' / ' + files.length + '：' + file.name;
-    const fd = new FormData();
-    fd.append('file', file);
-    try {
-      const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-      imported += d.imported || 0;
-      skipped += d.skipped || 0;
-      if (d.errors && d.errors.length) notes.push(file.name + '：' + d.errors.join('；'));
-    } catch (e) {
-      failedFile++;
-      notes.push(file.name + '：' + e.message);
-    }
+  importPending = null;
+  $('importPreview').hidden = true;
+  $('btnImportCommit').hidden = true;
+  if (!files.length) return;
+  // 导入是不可逆动作（覆盖已有凭据前还要过上游校验），所以分两步：选中文件后先
+  // 发一次 dryRun 预览——服务端只做解析、必填、uid 合法性与批内去重，不落盘、
+  // 不发上游请求；点「确认导入」才真正写入。
+  //
+  // 多文件在服务端是整体事务：任一文件不是合法 JSON 或没有任何账号就整体 400，
+  // 不做「先把前面那部分导进去」。顺序即选择顺序（先选的优先）。
+  importPending = { files, ready: false };
+  const label = files.length > 1 ? files.length + ' 个文件' : files[0].name;
+  $('importPreview').hidden = false;
+  $('importPreview').innerHTML = '<div class="hint">正在校验 ' + esc(label) + '…</div>';
+  try {
+    const d = await postImport(true);
+    importPending.result = d;
+    importPending.ready = true;
+    renderImportPreview(label, d);
+    $('btnImportCommit').hidden = false;
+  } catch (e) {
+    importPending = null;
+    $('importPreview').innerHTML = '<div class="hint" style="color:var(--warn)">校验失败，未导入任何账号：' + esc(e.message) + '</div>';
+    $('btnImportCommit').hidden = true;
   }
-
-  $('importDone').textContent = '导入完成：' + files.length + ' 个文件，成功 ' + imported + ' 个号'
-    + (skipped ? '，跳过 ' + skipped + ' 个号' : '')
-    + (failedFile ? '，' + failedFile + ' 个文件失败' : '');
-  if (notes.length) {
+};
+$('btnImportCommit').onclick = async () => {
+  if (!importPending || !importPending.ready) return;
+  const btn = $('btnImportCommit');
+  btn.disabled = true;
+  const label = importPending.files.length > 1 ? importPending.files.length + ' 个文件' : importPending.files[0].name;
+  try {
+    const d = await postImport(false);
+    $('importPreview').hidden = true;
+    $('importDone').hidden = false;
+    $('importDone').textContent = '导入完成（' + label + '）：新增 ' + (d.creates || 0)
+      + ' 个，覆盖 ' + (d.overwrites || 0) + ' 个'
+      + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
+    if (d.errors && d.errors.length) console.warn('import errors:', d.errors);
+    importPending = null;
+    $('btnImportCommit').hidden = true;
+    invalidatePackages();
+    loadOverview(true);
+  } catch (e) {
     $('importErr').hidden = false;
-    // .state 是 flex 且不保留换行，多条用「；」串起来。
-    $('importErr').textContent = notes.slice(0, 5).join('；')
-      + (notes.length > 5 ? '；…共 ' + notes.length + ' 条，其余见浏览器控制台' : '');
-    console.warn('import issues:', notes);
+    $('importErr').textContent = '导入失败：' + e.message;
+    btn.disabled = false;
   }
   invalidatePackages();
   loadOverview(true);
   $('importFile').value = '';
 };
+
+// 预览区：先给一句人话结论（新增/覆盖/跳过），再列具体条目问题。
+// 跳过项只列前 20 条——几百条的清单塞进弹窗只会把「结论」顶出视野。
+function renderImportPreview(label, d) {
+  const bits = ['新增 ' + (d.creates || 0) + ' 个', '覆盖 ' + (d.overwrites || 0) + ' 个'];
+  if (d.skipped) bits.push('跳过 ' + d.skipped + ' 个');
+  let html = '<div class="hint"><b>' + esc(label) + '</b> · 共 ' + (d.total || 0) + ' 条：' + bits.join('，') + '</div>';
+  if (d.overwrites) {
+    html += '<div class="hint" style="font-size:12px">覆盖项会先用 refresh 向上游求证新凭据可用，通过才写盘；不通过则保留原有凭据。</div>';
+  }
+  const errs = d.errors || [];
+  if (errs.length) {
+    const shown = errs.slice(0, 20);
+    html += '<div class="hint" style="font-size:12px;margin-top:4px;color:var(--ink-3)">跳过明细'
+      + (errs.length > shown.length ? '（前 ' + shown.length + ' 条，共 ' + errs.length + ' 条）' : '')
+      + '：</div><div style="max-height:120px;overflow:auto;font-size:12px;color:var(--ink-2)">'
+      + shown.map(e => '<div>' + esc(e) + '</div>').join('') + '</div>';
+  }
+  if (!d.imported) {
+    html += '<div class="hint" style="color:var(--warn)">没有可导入的账号。</div>';
+  }
+  $('importPreview').innerHTML = html;
+}
+
+// 导入请求：多文件按选择顺序塞进同一个 multipart，服务端逐份解码后合并。
+function postImport(dryRun) {
+  const fd = new FormData();
+  for (const f of importPending.files) fd.append('file', f, f.name);
+  if (dryRun) fd.append('dryRun', 'true');
+  const h = {};
+  const k = localStorage.getItem(LS_KEY);
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  return fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h })
+    .then(async r => {
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      return d;
+    });
+}
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */
 $('btnAdd').onclick = openAdd;
