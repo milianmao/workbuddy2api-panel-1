@@ -46,9 +46,14 @@ func TestDailyQuotaConfigSave(t *testing.T) {
 		t.Fatal("非法额度改变了配置或运行态")
 	}
 	// 不同账号的部分保存并发到达时，读-合并-写必须串行，不能互相覆盖。
+	// 串行由调用方（SaveConfig 闭包持有的那把锁）负责：saveConfig 自己不加锁
+	// （上游把锁收到调用点，避免闭包锁与内置锁两把锁嵌套）。这里用同一把锁模拟。
+	var saveMu sync.Mutex
 	var wg sync.WaitGroup
 	for _, body := range []string{`{"pool":{"account_daily_credit_limits":{"a":null}}}`, `{"pool":{"account_daily_credit_limits":{"b":0}}}`} {
 		wg.Go(func() {
+			saveMu.Lock()
+			defer saveMu.Unlock()
 			if err := save(body); err != nil {
 				t.Error(err)
 			}

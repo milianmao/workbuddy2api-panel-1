@@ -78,6 +78,231 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 🌐 **账号级代理池** | 账号可绑定出站代理（机场订阅导入，多号共用出口 IP）；未绑定 = 直连，行为零变化，见 [账号级代理池](#账号级代理池) |
 | 🖥️ **Web 管理面板** | 内嵌单页面板（明暗主题），账号运维 / 模型档位查询 / 在线改配置（热生效）/ 运行日志 / 积分任务，见 [Web 管理面板](#-web-管理面板) |
 
+## 🎬 媒体生成：生图 / 改图 / 出视频 / MCP
+
+网关除了对话，还把 WorkBuddy 的**媒体模型**包成 OpenAI 形态的 HTTP 接口，并额外给出一个 **MCP（Model Context Protocol）** 端点——Claude Code / Codex / Cursor / DeepSeekRuntime（DSH）这类 agent 配一行就能拿到「出图 / 出视频」工具，不必自己实现一遍鉴权、轮询和记账。
+
+### 接口一览
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| POST | `/v1/images/generations` | 文生图 |
+| POST | `/v1/images/edits` | 改图 / 图生图；`image` 可传公网 URL、`data:` URL 或 multipart 文件 |
+| POST | `/v1/videos` | 提交视频任务（OpenAI Videos 资源的路径，等价于下一行）。缺省 `wait=true`：阻塞到出片后回 200；`wait=false`：秒回 `task_id` |
+| POST | `/v1/videos/generations` | 同上 |
+| GET | `/v1/videos/{task_id}` | 查任务（`queued` / `in_progress` / `completed` / `failed`） |
+| GET | `/v1/videos/{task_id}/content` | 取成品字节（流式转发签名直链，不落盘；任务没出片回 409） |
+| POST | `/v1/videos/tasks` | 查任务，body `{"task_id":"..."}`（给不方便用路径参数的客户端） |
+| POST | `/v1/images/strip-watermark` | 裁掉底部纯白留白（顺带去水印），默认关闭；见「去水印」 |
+| POST | `/mcp` | MCP（JSON-RPC 2.0，Streamable HTTP 形态），见下 |
+
+视频回执按 OpenAI Videos 的 Video 资源出（`object:"video"`、`status` 四态、`seconds` 是字符串、`progress` 只有 0/100、`error` 是 `{code,message}` 对象），另带 `data[].url` / `videos[].url` / `usage.credit` 这几个自解释字段。OpenAI 的 Videos API 本身已于 2026-09-24 关停，这里对齐的是它还留在各家 SDK 里的形状。图片侧 `response_format:"b64_json"` 由网关取直链后转 base64（上游无视该参数）；`n>1` 直接回 400 —— 上游一次只出一张，宁可拒绝也不静默少给。
+
+模型名照旧带域前缀：`cn:hunyuan-image-alpha`、`cn:hunyuan-image-alpha-edit`、`cn:minimax-video-h3`、`cn:kling-video-v3`。`/v1/models` 会把媒体模型单列并带 `image_generation` / `video_generation` 标记（`modalities.output` 分别是 `["image"]` / `["video"]`）；没配 `model` 时生图用 `cn:hunyuan-image-alpha`、生视频用 `cn:minimax-video-h3`。
+
+### 生图 / 改图
+
+```bash
+curl -s http://127.0.0.1:7863/v1/images/generations \
+  -H "Authorization: Bearer $WB2API_KEY" -H 'Content-Type: application/json' \
+  -d '{"prompt":"一只戴礼帽的柴犬，像素风","size":"1024x1024"}'
+
+# 改图：image 支持公网 URL / data: URL / multipart 文件
+curl -s http://127.0.0.1:7863/v1/images/edits \
+  -H "Authorization: Bearer $WB2API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"cn:hunyuan-image-alpha-edit","prompt":"把背景换成星空","image":"https://…/in.png"}'
+```
+
+回执**原样透传**上游（`{created, data:[{url}], usage:{credit, …}}`），网关不转存字节——图是签名直链，约 24h 有效，要长期保存请自行落盘。实测 5.71 积分/张（`cn:hunyuan-image-alpha`）。
+
+> 改图的输入图必须是上游**取得到**的地址。拿「刚生成的那张图的签名直链」直接回投给改图接口，实测上游会回 `invoke model error`（它取不到/不认那个 URL）；用 `data:` URL 或自己可控的公网地址最稳。
+
+### 出视频（异步任务）
+
+```bash
+# 提交（不等待）
+curl -s http://127.0.0.1:7863/v1/videos/generations \
+  -H "Authorization: Bearer $WB2API_KEY" -H 'Content-Type: application/json' \
+  -d '{"prompt":"一杯热咖啡，热气缓缓上升","seconds":4,"wait":false}'
+# → {"id":"1312831544-WandVideo-…","object":"video","task_id":"…","status":"queued", …}
+
+# 查（阻塞到出片；不用 wait 参数时 POST 就是阻塞语义）
+curl -s http://127.0.0.1:7863/v1/videos/1312831544-WandVideo-… \
+  -H "Authorization: Bearer $WB2API_KEY"
+```
+
+请求参数：`prompt`（必填）、`model`、`seconds`（实测 4-15）、`resolution`、`aspect_ratio`（`16:9` / `9:16` / `1:1`）、`negative_prompt`、`enable_audio`（默认 `true`）、`watermark`（默认 `true`）、`image`（图生视频，公网/签名 URL）、`last_image`（尾帧）、`wait`（缺省 `true`）、`timeout_seconds`（缺省 900，封顶 1800）。除 `wait` / `timeout_seconds` 外都原样交给上游。
+
+回执（出片后）：
+
+```json
+{"id":"…","object":"video","task_id":"…","status":"completed","model":"cn:minimax-video-h3",
+ "created_at":1793801279,"completed_at":1793801403,"size":"768P","seconds":4,
+ "data":[{"url":"https://aigc-output-video-….cos.ap-guangzhou.myqcloud.com/….mp4?q-signature=…"}],
+ "videos":[{"url":"…"}],
+ "usage":{"credit":57.14,"output_video_tokens":200000,"output_video_duration":4,"output_video_coefficient":1},
+ "hint":"视频地址是签名直链（约 12 小时有效）；需要长期保存请自行落盘。"}
+```
+
+实测口径（2026-11-04，CN 池）：
+
+| 模型 | 请求 | 实际扣费 | 出片耗时 | 回执 size |
+|---|---|---|---|---|
+| `cn:minimax-video-h3` | 4s / 16:9 / 有声 | 57.14 | ≈124s | `768P` |
+| `cn:minimax-video-h3` | 4s 图生视频 | 57.14 | ≈124s | `768P` |
+| `cn:kling-video-v3` | 4s（实际出 5s） | 102.86 | ≈473s | 不回该字段 |
+
+几个必须知道的坑：
+
+- **上游不校验 `aspect_ratio` / `resolution`**：`4:3`、`999x999` 都能提交成功并正常出片。网关同样不假装校验（只把合法值写进文档），免得把上游未来支持的比例挡在外面。
+- **上游 `usage` 只回一次**：第一次查到 `completed` 时回，之后重复查询没有 `usage`（kling 连 `size` 都不回）。网关在任务台账里缓存这次用量，重复查询照样能拿到 `credit` / `size` / `seconds`。
+- **计费只记一次**：提交不扣钱，出片完成那一刻按 `usage.credit` 记一次（任务台账里的「已记账」标记 + 同步/异步两条路径共用同一把锁），重复查询、并发查询都不会重复记账。
+- **任务是账号级可见**：上游任务只对提交它的账号可见，账号结构里没有数字租户 id 可以反推，所以网关自己维护「task → 账号」台账；**台账在进程内存里**，重启后查询会退化成逐个账号试、命中即收养（此时若上游不再回 `usage`，这次查询就不带积分明细，但也不会重复扣费）。
+- **kling 慢一个量级**：MCP 默认 `wait=true`，客户端超时要给到 15 分钟以上；只想拿任务号就传 `wait=false`。
+
+### MCP 端点（`POST /mcp`）
+
+MCP 端点走 **Streamable HTTP** 的纯 POST 形态（不提供 SSE 流、不维护 session）：客户端发一条 JSON-RPC 就回一条 JSON-RPC。鉴权与 REST 相同（`Authorization: Bearer <api_key>`）；`GET /mcp` 回 405 + `Allow: POST`（客户端据此退回纯 POST）。
+
+```bash
+curl -s http://127.0.0.1:7863/mcp \
+  -H "Authorization: Bearer $WB2API_KEY" -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"0"}}}'
+```
+
+工具（5 个）：
+
+| 工具 | 说明 |
+|---|---|
+| `list_generation_models` | 列可用的生图 / 出视频模型（读目录旁路缓存，不打上游），带计费与直链时效说明 |
+| `generate_image` | 文生图，参数 `prompt`（必填）、`model`、`size`、`quality`、`n`；同步回 URL |
+| `edit_image` | 改图，参数 `prompt`（必填）、`image`（URL 或 `data:` URL，必填）、`model` |
+| `generate_video` | 出视频，参数 `prompt`（必填）、`model`、`seconds`、`resolution`、`aspect_ratio`、`negative_prompt`、`enable_audio`、`image`、`last_image`、`wait`（缺省 `true`） |
+| `get_video_task` | 查任务 / 收片，参数 `task_id` |
+
+客户端配置（Claude Code / DSH / 任何支持 HTTP MCP 的宿主）：
+
+```json
+{"mcpServers":{"wb2api":{"type":"http","url":"http://127.0.0.1:7863/mcp",
+  "headers":{"Authorization":"Bearer <api_key>"}}}}
+```
+
+约定：**工具执行失败**（上游 4xx/5xx、任务 failed）回 `result.isError=true` + 上游原话进 `content[0].text`，让模型自己读到「时长只支持 4-15 秒」这类可行动信息；**参数不合法**（缺 `prompt` / 缺 `task_id` / 未知工具）才走 JSON-RPC `-32602`。工具调用内部直接复用网关自己的 HTTP handler（`httptest` 形态），所以换号、错误策略、记账、请求日志与 REST 完全同一条路径——不会出现「REST 记了账、MCP 漏了账」这种分叉。
+
+### 去水印（可选，默认关闭）
+
+成品右下角有「AI生成 / WORKBUDD>.」水印。它是**白色半透明**、锚在右下角（距右边 / 下边各约 10px）：1024 / 1536 边长档量出来固定 **111×51px**，1344×1792 档约 126×80px，**不随画布缩放**。
+
+两条路，按需选：
+
+1. **白底上它本来就不显眼**——纯白区像素均值 255.0 / 标准差 0.1，成品最终排在白底上时肉眼看不出来，可以不处理。
+2. **要彻底去干净就裁**：让画面底部真有一条纯白留白，再把这条留白整条裁掉，水印必然一起消失（水印最高约 80px，留白 ≥ 90px 才安全）。
+
+模型不总肯留白（实测：杯子 38.5%、猫 31.2%、深色木桌那张只有 1.0%），所以稳的打法是两步：
+
+```bash
+# 1) 生成时直接要留白（不给白边就补一刀）
+curl -s http://127.0.0.1:7863/v1/images/generations   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"   -d '{"model":"cn:hunyuan-image-alpha","size":"1024x1536",
+       "prompt":"……；画面最下方三分之一是完全纯白留白，不要有任何物体、阴影、反光、文字"}'
+
+# 留白不够？用改图补一条白边（约 5.71 credit）
+curl -s http://127.0.0.1:7863/v1/images/edits   -H "Authorization: Bearer $KEY"   -F image=@photo.png   -F 'prompt=把图片最下方约三分之一区域涂成纯白色（#FFFFFF）空白留白，不要改变上方画面'
+
+# 2) 裁掉留白（本地解码裁剪，不扣积分）
+curl -s http://127.0.0.1:7863/v1/images/strip-watermark   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json"   -d '{"image":"https://….myqcloud.com/….png","min_blank_px":90}'
+```
+
+回执（`data_url` 是裁好的图，`return:"meta"` 时只回数字不返回图）：
+
+```json
+{
+  "object": "image.strip",
+  "width": 1024, "height": 1536, "out_width": 1024, "out_height": 944,
+  "boundary": 944, "blank_px": 592, "blank_ratio": 0.385, "blank_lum": 254.4,
+  "min_blank": 90, "white_lum": 248, "safe": true, "format": "png",
+  "data_url": "data:image/png;base64,…",
+  "usage": {"credit": 0, "hint": "本地后处理，不消耗上游积分"}
+}
+```
+
+参数：`image`（必填：上游产物域 URL / `data:` URL / 裸 base64）、`min_blank_px`（默认 90）、`keep_blank`（裁完在内容下方留几像素白边，默认 0）、`format`（`png` / `jpeg`，省略跟随输入）、`quality`（JPEG 默认 92）、`return`（`data_url` 默认；`meta` 只回数字，适合先校验留白够不够）。
+
+留白不够时回 **422 `no_blank_strip`**，`gateway_hint` 里带实测数字和下一步（先 `edit_image` 涂白）。MCP 侧同名工具 `strip_watermark`，回 MCP `image` content（base64）+ 文本元数据。
+
+开关 `features.watermark_strip_enabled`（默认 `false`，面板保存后热生效）：关着时端点回 **403 `watermark_strip_disabled`**，MCP 的 `strip_watermark` 也不出现在 `tools/list` 里，其它生成接口完全不受影响。默认关是因为它要把成品图回读、解码、再 base64 回传（1024×1536 PNG 约 2.5MB → base64 3.4MB），只在真要彻底去水印时划算。
+
+边界：只裁「整条纯白留白」，不做 inpainting；`min_blank_px` 调小会切到画面内容；裁切会改画幅，介意就 `keep_blank` 少裁一点。图片地址只允许上游产物域（`.myqcloud.com`），防止被当成 SSRF 跳板。
+
+## 代理池与账号绑定
+
+面板「代理池」支持一行一个批量添加，接受 `http`、`https`、`socks5`、`socks5h` URL，包括用户名密码。空行忽略，重复项跳过，无效行单独报告，其他有效行仍保存。例如：
+
+```text
+http://user:password@127.0.0.1:8080
+https://127.0.0.1:8443
+socks5://user:password@127.0.0.1:1080
+socks5h://127.0.0.1:1081
+```
+
+账号池每行的代理菜单保存后立即生效：
+
+| 模式 | 出站行为 |
+|---|---|
+| 默认随机 | 每个 HTTP 请求独立从可用节点中随机选择；该请求的重定向和响应流保持同一节点 |
+| 直连 | 使用原有直连传输 |
+| 固定代理 | 只用绑定节点；节点故障时保留绑定并返回代理错误 |
+
+分区默认出口（面板「代理池 → 分区默认出口」）按 realm 指定：`cn` 与 `global` 各一条，账号行没单独指定代理时取它。查表顺序是**账号绑定 > realm 默认 > 随机池 > 直连**——账号行里点过「直连」的号不会被 realm 默认覆盖。
+
+池为空时默认随机使用直连。池中已有节点但没有可用节点时返回错误。代理故障不处罚账号，不触发额外换号重试。聊天、图片、搜索、嵌入、token 刷新、余额和账号后台任务使用同一账号路由入口。未关联账号的 OAuth 授权与更新下载沿用原出站行为。
+
+HTTP/HTTPS 使用标准代理传输；`socks5` 在本机解析目标域名，`socks5h` 由代理解析。各节点复用独立连接池，沿用现有 DNS、TLS、响应头超时和流式空闲控制。禁用或删除只关闭空闲连接，在途请求继续完成。
+
+自动测活默认每 60 秒运行，单次超时 10 秒，最多 8 个节点并发。默认检测 `https://www.workbuddy.cn/`，最终响应为 2xx/3xx 即成功。新增节点与重启后的节点先检测，首次成功后进入候选；连续失败 3 次自动禁用，之后连续成功 2 次恢复。面板可修改 URL、间隔、超时与阈值，也可单独或全部检测。手动禁用优先，检测成功仍保持禁用。业务限流、余额不足等响应不影响测活状态。
+
+节点、手动启停、账号绑定与测活设置原子保存到 `state_file` 同目录的 `proxy-pool.json`，健康状态仅保存在内存。代理列表、接口响应和错误日志不返回密码；编辑时密码留空保持原值，从 URL 删除用户名可移除认证。被账号或 realm 默认引用的节点禁止删除（HTTP 409），需先解除引用；从面板删除账号时同步清理绑定。
+
+管理接口沿用面板鉴权：
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET / POST | `/panel/api/proxies` | 列表与批量添加（`{"lines":"..."}`） |
+| PATCH / DELETE | `/panel/api/proxies/{id}` | 编辑（`name`、`url`、`password`、`enabled`）与删除 |
+| POST | `/panel/api/proxies/{id}/check` | 排队检测单个节点 |
+| POST | `/panel/api/proxies/check` | 排队检测所有节点 |
+| PUT | `/panel/api/proxies/health` | 保存 `url`、`interval_seconds`、`timeout_seconds`、`failure_threshold`、`success_threshold` |
+| PUT | `/panel/api/accounts/{uid}/proxy` | 保存 `{"mode":"random"}`、`{"mode":"direct"}` 或 `{"mode":"fixed","proxy_id":"..."}` |
+| PUT | `/panel/api/proxies/realm/{realm}` | 同上格式，保存 `cn` / `global` 的分区默认出口 |
+
+### 订阅内容直接导入
+
+除了逐行 URL，同一个输入框也接受**订阅正文**，自动识别三种形态：
+
+- 明文 URI 列表（一行一个，`#` 开头为注释）；
+- 整段 base64 订阅（机场/V2Ray 常见形态）；
+- Clash / mihomo 的 YAML 配置全文（只取 `proxies:` 段，`proxy-groups:` 等一概不看）。
+
+`ss` / `vmess` / `vless` / `trojan` / `hysteria2` / `tuic` 等协议**不由本网关解析**——传输层只支持 `http`/`https`/`socks5`。这些节点不会被静默丢弃：导入结果里单列「不支持 N 个」并逐条给出协议名，可操作的做法是在本机另起一个 mihomo 导出 socks5 端口，再把那个 `socks5://` 地址导入。
+
+网关**不抓取订阅 URL**：面板进程去 GET 任意外部地址是 SSRF 面（内网探测、云元数据端点），需要有独立的域名白名单与出站审计才安全。把订阅内容（或订阅返回的正文）粘进输入框即可。
+
+## 额度窗口探针
+
+上游的免费额度窗口按**首次请求**起算。某条「账号 × 模型」的配额打满后，上游 429 会给一个「将在 … 重置」的绝对时刻；到点之后如果没有任何请求进来，新一轮窗口就不会开始，额度一直空转——等下一条真实请求进来，起点才被动落到那一刻，中间那段白扔。
+
+网关原来的处理到「解除冷却」为止（允许请求进来），是**被动**的。`schedule.window_probe_enabled`（默认 `true`）打开后，429 带重置时刻时会登记一条窗口（落 `state.json` 的 `model_windows`，跨重启存活），到点由排程主动发一个最小请求（`max_tokens=16`、单条 user 消息）把新一轮窗口的计时起点钉住。
+
+四种结果的处置：
+
+| 探针结果 | 动作 |
+|---|---|
+| 2xx | 清掉该 (账号, 模型) 的 6004 冷却，删窗口记录 |
+| 429 + 更晚的重置时刻 | 换成上游新给的墙钟，计数归零（确实进入了新一轮等待） |
+| 429 + 同样/更早的时刻 | 上游还没放开：计数 +1，15 秒后重试 |
+| 其它错误 | 同样重试；连续 20 次（约 5 分钟）放弃，下一次真实 429 会重新登记 |
+
+刻意**不**做主动扫描「还没被限流的配额线」（那是另一种功能：请求量随账号 × 模型数增长，与「已知满了、只等起窗」不是一件事）。账号被停用时探针不发请求，只把记录往后推。
+
 ## 🎯 成长任务一键完成（17/18）
 
 官方「成长计划」的 18 个成长任务中，**17 个可在面板上一键纯 API 完成**——无需安装官方客户端、无需人工交互，点一下「一键完成」即自动推进进度、等待异步计分落定并**自动领奖**。剩余任务展示操作指引。
@@ -182,6 +407,17 @@ Start-ScheduledTask -TaskName 'wb2api-panel'
 2. 更新前后各打一次 `curl http://127.0.0.1:7863/healthz`，确认新进程确实起来了（面板右下角也会显示版本号）。
 
 > 内置服务模式（`wb2api.exe install-service` 走 SCM）没有做：更新重启要连带重写服务控制逻辑，且 CI 只有 Linux 构建机，Windows 服务生命周期没法做回归。用上面两种效果等价。
+
+## 🍎 macOS 菜单栏启动器（第三方，不在本仓库）
+
+macOS 上不用自己拼常驻方案：社区维护了一个菜单栏启动器，常驻图标里能启停 `wb2api`、看账号池健康度、一键更新（下载 → sha256 校验 → 停服 → 原子替换 → 重启，失败回滚），模型清单里能直接复制免费模型的 ID。
+
+- 源码与 Release：[`hardwin2023/workbuddy2api-panel`](https://github.com/hardwin2023/workbuddy2api-panel)（`macapp/` 目录，`swiftc` 直接编译，不需要 Xcode 工程）
+- 更新源已指向本仓库的 Release，资产按 `darwin-<arch>.zip` 选取，`checksums` 走 GitHub 每个资产自带的 sha256 `digest`（拿不到就中止，不降级）
+
+**这属于第三方项目，本仓库不构建、不验证它**：我们的 CI 只有 Linux 构建机（`binaries.yml` / `docker-ghcr.yml`），Swift 应用在这里没有回归手段。把它单独放一个仓库 + 这里给个入口，是刻意选择——避免往本仓库塞一份没人能在 CI 上验过的代码。它读的 `/v1/models` 字段（含 `credits` / `promo_*`）由本仓库保证向后兼容：新增字段只增不改，旧客户端读到多少还是多少。
+
+DMG 未公证，首次打开需要右键 →「打开」。
 
 ## 🆚 与上游的差异
 
