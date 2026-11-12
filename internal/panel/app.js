@@ -1449,7 +1449,10 @@ async function loadModels(force) {
     // global 探测失败（如 DNS 抖动 → 5min 负缓存）时页面只剩 CN 模型，无从知道原因。
     const errs = Array.isArray(d.fetch_errors) ? d.fetch_errors.filter(Boolean) : [];
     const errNote = errs.length ? ' · ⚠ ' + errs.join('；') : '';
-    $('mdNote').textContent = mdAll.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '') + srcNote + errNote;
+    // stale：后端本次取数失败、给的是上一次成功的目录——必须说清楚，否则用户会以为
+    // 这就是当前真实目录（2026-11-12：探针号钉在死节点上，页面只剩 4 条出图/出视频）。
+    const staleNote = d.stale ? ' · ⚠ 本次取数失败，沿用上次成功目录' : '';
+    $('mdNote').textContent = mdAll.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '') + srcNote + errNote + staleNote;
     renderModels();
     refreshEffortDowngradeNote(); // 模型目录到位后才知道哪些档位会降级
   } catch (e) {

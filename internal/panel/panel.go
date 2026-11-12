@@ -749,17 +749,33 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
 	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
 	var cnAcct, globalAcct *auth.Auth // 供下方模型繁忙度复用同一批账号
-	if uids := p.cfg.Pool.AvailableUIDsForRealm("cn"); len(uids) > 0 {
-		if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
-			cnAcct = acct
+	if uids := p.cfg.Pool.ModelProbeUIDs("cn", pool.ModelProbeLimit); len(uids) > 0 {
+		// 探针候选：直连号优先，失败换下一个（见 pool.ModelProbeUIDs）。此前只取
+		// AvailableUIDsForRealm[0]，那个号钉的节点一坏，整份 CN 目录就没了——面板
+		// 只剩出图/出视频，/v1/models 同步缩水（2026-11-12 实案）。
+		cnErrMsg := ""
+		for _, uid := range uids {
+			acct := p.cfg.Pool.AuthByUID(uid)
+			if acct == nil {
+				continue
+			}
 			infos, err := p.cfg.Upstream.FetchModels(acct)
-			if err != nil {
-				catalogErrs = append(catalogErrs, "cn: "+err.Error())
-			} else {
+			if err == nil && len(infos) > 0 {
+				cnAcct = acct
 				for _, mi := range infos {
 					out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
 				}
+				cnErrMsg = ""
+				break
 			}
+			if err != nil {
+				cnErrMsg = err.Error()
+			} else {
+				cnErrMsg = "上游未返回可用模型"
+			}
+		}
+		if cnErrMsg != "" {
+			catalogErrs = append(catalogErrs, "cn: "+cnErrMsg)
 		}
 	}
 
@@ -888,6 +904,22 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 分域取数失败、但手上有上一次成功的目录：给旧目录 + 告警（stale），而不是把整屏
+	// 缩成出图/出视频那几条。前端按 stale 标注「沿用上次成功目录」（2026-11-12 实案）。
+	if len(catalogErrs) > 0 {
+		if stale := p.loadModelsCacheStale(); stale != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":            true,
+				"models":        p.withLiveFlags(stale.models),
+				"global_source": stale.globalSource,
+				"cached":        true,
+				"stale":         true,
+				"fetch_errors":  catalogErrs,
+			})
+			return
+		}
+	}
+
 	if len(out) == 0 {
 		if errs := append(append([]string{}, catalogErrs...), busyErrs...); len(errs) > 0 {
 			writeErr(w, http.StatusBadGateway, "fetch models: "+strings.Join(errs, "; "))
@@ -927,6 +959,14 @@ func (p *Panel) loadModelsCache() *modelsCacheEntry {
 	if p.modelsCache == nil || time.Since(p.modelsCacheAt) >= modelsCacheTTL {
 		return nil
 	}
+	return p.modelsCache
+}
+
+// loadModelsCacheStale 返回上一次成功聚合的结果（忽略 TTL）；从未成功过返回 nil。
+// 用于分域取数失败时的降级：宁可给旧目录 + 告警，也不要只剩出图/出视频。
+func (p *Panel) loadModelsCacheStale() *modelsCacheEntry {
+	p.modelsMu.Lock()
+	defer p.modelsMu.Unlock()
 	return p.modelsCache
 }
 

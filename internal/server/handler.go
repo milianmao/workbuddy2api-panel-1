@@ -846,9 +846,10 @@ func (h *Handler) fetchGlobalModels() ([]string, *auth.Auth) {
 	return h.cfg.Upstream.FetchGlobalModels(acct), acct
 }
 
-// fetchDynamicModels 从第一个可用 CN 账号拉模型列表（含 contextWindow/maxTokens），
-// 缓存 10min。
-// 选号与 /panel/api/models 完全同口径（AvailableUIDsForRealm("cn") 首个 + AuthByUID），
+// fetchDynamicModels 从候选 CN 账号拉模型列表（含 contextWindow/maxTokens），缓存 10min。
+// 候选顺序见 pool.ModelProbeUIDs：未绑固定代理（直连）的号排前面，失败按顺序换下一个，
+// 最多 pool.ModelProbeLimit 个——单个号钉在坏节点上不再能拖垮整份目录（2026-11-12 实案）。
+// 选号与 /panel/api/models 完全同口径（ModelProbeUIDs + AuthByUID），
 // 而非 Pool.Pick()：Pick 无 realm 过滤，混合池里可能选中 global 号去打 CN 端点，
 // 表现为偶发失败/面板与 /v1/models 两套目录（PR #38 报告并给出的选号修复）。
 // 缓存 + 5min 负缓存按既有语义**保留**（#38 原案整体删除缓存被拒）：公开端点逐请求
@@ -862,44 +863,73 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 		dynamicModelsCache.RUnlock()
 		return out
 	}
-	// 失败负缓存：冷却期内不再请求上游。
+	// 失败负缓存：冷却期内不再请求上游。缓存里若有上一次成功的目录就继续给它
+	// （stale-while-error）：上游抖一下不该让 /v1/models 从 22 条直接变空。
+	stale := dynamicModelsCache.ids
 	if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
 		dynamicModelsCache.RUnlock()
+		if len(stale) > 0 {
+			return stale
+		}
 		return nil
 	}
 	dynamicModelsCache.RUnlock()
 
-	uids := h.cfg.Pool.AvailableUIDsForRealm("cn")
-	if len(uids) == 0 {
+	candidates := h.cfg.Pool.ModelProbeUIDs("cn", pool.ModelProbeLimit)
+	if len(candidates) == 0 {
 		return nil
 	}
-	acct := h.cfg.Pool.AuthByUID(uids[0])
-	if acct == nil {
-		return nil
-	}
-	infos, err := h.cfg.Upstream.FetchModels(acct)
-	if err != nil || len(infos) == 0 {
-		// 拉取失败只进负缓存（5min lastFail），不 NoteError：NoteError 喂的是 chat
-		// 熔断器，models 端点偶发 5xx 跨界惩罚 chat 通道健康的账号；
-		// models 拉取失败 ≠ 账号 chat 不可用。
-		// 只在真正打上游失败时记一行（负缓存期内前面已直接 return，不会刷屏）：
-		// 此前这里静默，CN 域不可达时 /v1/models 只剩 global 模型却毫无线索。
+	var lastErr error
+	for _, uid := range candidates {
+		acct := h.cfg.Pool.AuthByUID(uid)
+		if acct == nil {
+			continue
+		}
+		infos, err := h.cfg.Upstream.FetchModels(acct)
+		if err == nil && len(infos) > 0 {
+			dynamicModelsCache.Lock()
+			dynamicModelsCache.ids = infos
+			dynamicModelsCache.fetched = time.Now()
+			dynamicModelsCache.lastFail = time.Time{} // 成功则清空负缓存
+			dynamicModelsCache.Unlock()
+			return infos
+		}
 		if err == nil {
 			err = fmt.Errorf("models api returned empty list")
 		}
-		log.Printf("WARN: [server] /v1/models: CN 模型目录拉取失败（%s 内不再重试，cn: 模型暂不列出）: %v",
-			modelsFetchFailCooldown, err)
-		dynamicModelsCache.Lock()
-		dynamicModelsCache.lastFail = time.Now()
-		dynamicModelsCache.Unlock()
-		return nil
+		lastErr = err
+		// 只在还有下一个候选时记一行：单号池没必要为一次失败写两条日志。
+		if len(candidates) > 1 {
+			log.Printf("WARN: [server] /v1/models: 探针账号 %s 拉取失败，换下一个: %v", modelsProbeUIDLabel(uid), err)
+		}
 	}
+	// 全部候选都失败：进负缓存，但**保留上一次成功的目录**继续对外。
+	// 拉取失败只进负缓存（5min lastFail），不 NoteError：NoteError 喂的是 chat
+	// 熔断器，models 端点偶发 5xx 跨界惩罚 chat 通道健康的账号；
+	// models 拉取失败 ≠ 账号 chat 不可用。
 	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = infos
-	dynamicModelsCache.fetched = time.Now()
-	dynamicModelsCache.lastFail = time.Time{} // 成功则清空负缓存
+	dynamicModelsCache.lastFail = time.Now()
+	stale = dynamicModelsCache.ids
 	dynamicModelsCache.Unlock()
-	return infos
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no probe account available")
+	}
+	if len(stale) > 0 {
+		log.Printf("WARN: [server] /v1/models: CN 模型目录拉取全部失败（%d 个候选，%s 内不再重试），沿用上次成功的 %d 条目录: %v",
+			len(candidates), modelsFetchFailCooldown, len(stale), lastErr)
+		return stale
+	}
+	log.Printf("WARN: [server] /v1/models: CN 模型目录拉取失败（%s 内不再重试，cn: 模型暂不列出）: %v",
+		modelsFetchFailCooldown, lastErr)
+	return nil
+}
+
+// modelsProbeUIDLabel 日志里只露 uid 前 8 位（与其它日志口径一致，避免整条 uid 刷屏）。
+func modelsProbeUIDLabel(uid string) string {
+	if len(uid) > 8 {
+		return uid[:8]
+	}
+	return uid
 }
 
 // cachedModelsSnapshot 只读模型目录缓存（TTL 内快照）；缓存冷/空 → nil。
