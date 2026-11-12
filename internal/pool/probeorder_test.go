@@ -43,3 +43,18 @@ func TestModelProbeUIDsPrefersUnbound(t *testing.T) {
 		t.Fatalf("空池候选=%v want nil", got)
 	}
 }
+
+// 外部谓词说「这个号其实钉着节点」时必须采信：池条目上的 proxyID 只是镜像，
+// 绑定真相在 proxypool 的 data/proxy-pool.json 里，两者会不一致（2026-11-12 实案）。
+func TestModelProbeUIDsWithPrefersRealBinding(t *testing.T) {
+	p := realmPool(t) // cn1、cn2
+	p.Add(&auth.Auth{UID: "cn3", Domain: "www.codebuddy.cn"})
+
+	// 镜像全空（池条目不知道有绑定），但真正钉了节点的是 cn1 与 cn3。
+	bound := map[string]bool{"cn1": true, "cn3": true}
+	got := p.ModelProbeUIDsWith("cn", ModelProbeLimit, func(uid string) bool { return !bound[uid] })
+	want := []string{"cn2", "cn1", "cn3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ModelProbeUIDsWith=%v want %v", got, want)
+	}
+}

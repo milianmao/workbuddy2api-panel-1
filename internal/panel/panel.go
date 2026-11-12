@@ -749,7 +749,14 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
 	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
 	var cnAcct, globalAcct *auth.Auth // 供下方模型繁忙度复用同一批账号
-	if uids := p.cfg.Pool.ModelProbeUIDs("cn", pool.ModelProbeLimit); len(uids) > 0 {
+	// 直连判定用 proxypool 的真实绑定（池条目上的 proxyID 只是镜像，可能滞后）。
+	probeDirect := func(uid string) bool {
+		if p.cfg.Proxypool != nil {
+			return p.cfg.Proxypool.ExitKey(uid) == ""
+		}
+		return p.cfg.Pool.AccountProxy(uid) == ""
+	}
+	if uids := p.cfg.Pool.ModelProbeUIDsWith("cn", pool.ModelProbeLimit, probeDirect); len(uids) > 0 {
 		// 探针候选：直连号优先，失败换下一个（见 pool.ModelProbeUIDs）。此前只取
 		// AvailableUIDsForRealm[0]，那个号钉的节点一坏，整份 CN 目录就没了——面板
 		// 只剩出图/出视频，/v1/models 同步缩水（2026-11-12 实案）。

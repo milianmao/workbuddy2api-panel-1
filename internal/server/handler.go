@@ -875,7 +875,14 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	}
 	dynamicModelsCache.RUnlock()
 
-	candidates := h.cfg.Pool.ModelProbeUIDs("cn", pool.ModelProbeLimit)
+	// 直连判定优先用 main 注入的 ExitTagOf（proxypool 的真实绑定），nil 时退回池镜像。
+	probeDirect := func(uid string) bool {
+		if h.cfg.ExitTagOf != nil {
+			return h.cfg.ExitTagOf(uid) == ""
+		}
+		return h.cfg.Pool.AccountProxy(uid) == ""
+	}
+	candidates := h.cfg.Pool.ModelProbeUIDsWith("cn", pool.ModelProbeLimit, probeDirect)
 	if len(candidates) == 0 {
 		return nil
 	}
