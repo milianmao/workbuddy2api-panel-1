@@ -38,6 +38,9 @@ type proxyItem struct {
 	CheckedAt int64  `json:"checked_at"`
 	Fails     int    `json:"fails"`
 	Accounts  int    `json:"accounts"`
+	// Exit 出口画像（国家 / 住宅或机房 / ISP / ASN），来自上游 3d0f293 的 ip-api 观测。
+	// 空字段 = 不知道，不是「没问题」；前端只在 ip 非空时渲染这一行。
+	Exit proxypool.ExitInfo `json:"exit"`
 }
 
 // subItem 订阅行。
@@ -67,6 +70,7 @@ func (p *Panel) proxiesList(w http.ResponseWriter, r *http.Request) {
 			CheckedAt: v.CheckedAt.Unix(),
 			Fails:     v.Failures,
 			Accounts:  v.BoundCount,
+			Exit:      v.Exit,
 		}
 		if p.cfg.NodeBridge != nil {
 			if m, ok := p.cfg.NodeBridge.Meta(v.URL); ok {

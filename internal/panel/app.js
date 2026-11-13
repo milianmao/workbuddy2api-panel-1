@@ -6005,7 +6005,7 @@ function renderProxies(list) {
     const on = !!p.enabled;
     return '<tr' + (on ? '' : ' class="off"') + '>' +
       '<td class="pick"><input type="checkbox" class="pk" data-p="' + esc(p.id) + '"' + (proxySel.has(p.id) ? ' checked' : '') + ' aria-label="选择该节点"></td>' +
-      '<td class="who"><div class="nm">' + esc(p.tag || '(未命名)') + '</div></td>' +
+      '<td class="who"><div class="nm">' + esc(p.tag || '(未命名)') + '</div>' + proxyExitNote(p) + '</td>' +
       '<td>' + esc(p.type || '—') + '</td>' +
       '<td>' + esc(p.server || '—') + ':' + esc(p.port == null ? '?' : p.port) + '</td>' +
       '<td>' + esc(subNameOf(p.sub_id)) + '</td>' +
@@ -6019,6 +6019,16 @@ function renderProxies(list) {
       '</div></td></tr>';
   }).join('');
   syncProxySel();
+}
+
+/* proxyExitNote 出口画像（国家 / 住宅或机房 / ISP / ASN）。全空 = 不知道，不是「没问题」，
+   所以任何字段缺就只显示有的那几段；整条 ip 都没有就整行不渲染。 */
+function proxyExitNote(p) {
+  const ex = p && p.exit;
+  if (!ex || !ex.ip) return '';
+  const kind = ({ residential: '住宅', datacenter: '机房' })[ex.ip_type] || '';
+  const parts = [ex.country, kind, ex.isp].filter(Boolean).map(t => esc(t));
+  return '<div class="note">出口 ' + esc(ex.ip) + (parts.length ? ' · ' + parts.join(' · ') : '') + '</div>';
 }
 
 /* syncProxySel 把「已选 N 个」与全选框（含半选态）刷到节点表头，照 syncAccSel。 */
