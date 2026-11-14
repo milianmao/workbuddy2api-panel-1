@@ -387,7 +387,7 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 对齐官方：授权链接补 version（workbuddy 域再加设备 nonce）。
-	st.AuthURL = loginsite.DecorateAuthURL(st.AuthURL, site, loginDeviceNonce())
+	st.AuthURL = loginsite.DecorateAuthURL(st.AuthURL, site, loginDeviceNonce(), loginsite.NewLoginSessionID())
 	p.loginMu.Lock()
 	// 顺手回收过期会话，防"开弹窗走开"的 state 滞留。
 	for s, sess := range p.logins {
@@ -595,17 +595,18 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	// 落盘 + 入池与目录热重载串行化（issue #199 风险 3）：登录刚写出半份文件时
 	// 若正好被重载扫到，该账号会被判成「解析失败」进而在本轮拒绝删除——不会丢，
 	// 但这一轮的 upsert 顺序可能反过来把旧凭证盖回来。持同一把锁就没有这个窗口。
-	p.reloadMu.Lock()
-	saveErr := a.SaveAtomic()
-	if saveErr == nil {
-		p.cfg.Pool.Add(a)
-	}
-	p.reloadMu.Unlock()
+	isNewAccount, saveErr := p.saveLoginAuth(a)
 	if saveErr != nil {
 		writeErr(w, http.StatusInternalServerError, "save auth: "+saveErr.Error())
 		return
 	}
-	isNewAccount := p.addLoggedInAccount(a)
+	// 登录落池与导入同一口径：上游的 Revive 是「人工恢复」语义（清掉旧号遗留的
+	// 禁用/冷却/熔断），但新号的来路与健康度还没验证（实测有登录后第一个请求就
+	// 403 code=11140），所以 Revive 之后必须再 Hold——Hold 带「待确认」标记，
+	// 解冻清不掉，只有面板「恢复选号」才解除。
+	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
+	p.cfg.Pool.Hold(acct.UID)   // 但新号不直接进选号池：hold 待确认，解冻也清不掉
+	log.Printf("panel: 新号待确认 uid=%s（已暂停选号，确认可用后点「恢复选号」）", acct.UID)
 
 	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
 	// realm 分支：CN 走 DailyCheckin；global 无 CN 签到体系，改为注册激活 + trial 领取
@@ -673,6 +674,20 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		"checkin_message": checkinMsg,
 		"balance_error":   balanceErr,
 	})
+}
+
+// saveLoginAuth 登录结果落盘并入池，返回登录的是否池里原本没有的号。
+// 落盘与入池在 reloadMu 内，与账号目录热重载串行。「是否新号」必须在 Add 之前判，
+// 否则恒为 false，新号的后台任务永远不启动。
+func (p *Panel) saveLoginAuth(a *auth.Auth) (isNew bool, err error) {
+	p.reloadMu.Lock()
+	defer p.reloadMu.Unlock()
+	isNew = p.cfg.Pool.AuthByUID(a.UID) == nil
+	if err := a.SaveAtomic(); err != nil {
+		return false, err
+	}
+	p.cfg.Pool.Add(a)
+	return isNew, nil
 }
 
 // joinMsg 拼接 login 完成后的提示消息（多段用「；」连接，空段跳过）。

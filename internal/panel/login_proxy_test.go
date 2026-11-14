@@ -53,7 +53,16 @@ func TestLoginWithProxy(t *testing.T) {
 			rec = httptest.NewRecorder()
 			pn.ServeHTTP(rec, req)
 			var start struct{ URL, State, Site string }
-			if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil || rec.Code != http.StatusOK || start.State != "via-proxy" || start.Site != site || strings.Contains(start.URL, "version=") {
+			// 2026-11-14 上游按真机对齐：授权链接必须带 version（CN 5.9.3 / GL 5.9.4），
+			// 且 loginSessionId 只给 CN。这里断言的就是这两条，别再退回「不带 version」。
+			wantVer := "version=" + loginsite.ClientVersionWorkBuddyGL
+			wantSession := false
+			if site == loginsite.SiteCN {
+				wantVer = "version=" + loginsite.ClientVersionWorkBuddyCN
+				wantSession = true
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &start); err != nil || rec.Code != http.StatusOK || start.State != "via-proxy" || start.Site != site ||
+				!strings.Contains(start.URL, wantVer) || strings.Contains(start.URL, "loginSessionId=") != wantSession {
 				t.Fatalf("授权请求未走指定代理: %d %s", rec.Code, rec.Body)
 			}
 			req = httptest.NewRequest(http.MethodGet, "/panel/api/login/poll?state="+start.State, nil)

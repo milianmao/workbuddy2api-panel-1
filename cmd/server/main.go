@@ -209,6 +209,20 @@ func main() {
 		log.Printf("[upstream] TLS 指纹为原生 Go 形态（JA3/JA4 与官方客户端不一致）")
 	}
 
+	// 3D 临时云凭证：手工表（features.three_d_temp_tokens）优先，自动签发兜底
+	// （features.three_d_auto_token，默认 true——用账号自己的 access token 调官方
+	// /v2/api-keys 换 ck_t_，协议见 internal/upstream/three_d_credential.go）。
+	// 两条路径都拿不到时 3D 链路在发请求前就回 503。凭证内容不进日志。
+	static3D := configureThreeDCredentials(up, cfg)
+	if static3D.Empty() && cfg.Features.ThreeDEnabled {
+		if cfg.Features.ThreeDAutoToken {
+			log.Printf("[3d] 已开启 features.three_d_enabled：临时凭证将用账号 access token 自动签发（features.three_d_auto_token=true）")
+		} else {
+			log.Printf("[3d] 已开启 features.three_d_enabled，但没有配置 features.three_d_temp_tokens 且自动签发已关闭；" +
+				"3D 请求会回 503 three_d_credential_missing")
+		}
+	}
+
 	// 出站 DNS（config dns_servers / WB2A_DNS）：显式指定解析器，绕开系统配置。
 	// 典型场景是 Android（无 /etc/resolv.conf，Go 解析器退回 [::1]:53 全域名失败）
 	// 与本地 DNS 被污染。未配置时保持系统解析器，行为零变化。
@@ -247,8 +261,9 @@ func main() {
 	// 经代理的 HTTPS 与直连同一指纹、同一请求头顺序（上游 #136：TLSOver 在
 	// 隧道上重做握手；http.Transport 的 DialTLSContext 不能沿用直连那份）。
 	proxySvc.SetTLSOver(up.TLSOver)
-	// 出口画像（国家 / 住宅或机房 / ISP）：随健康探测顺手查，查不到就空着，不参与选号。
-	proxySvc.EnableExitLookup()
+	// 出口画像（国家 / 住宅或机房 / ISP）：上游改成开关式（features.proxy_exit_lookup，
+	// 缺省关），打开后随健康探测**经该代理自己**去查——才是每个节点自己的出口。
+	proxySvc.SetExitLookup(cfg.Features.ProxyExitLookup)
 	up.ProxyPool = proxySvc
 
 	nodeBridge, bridgeErr := nodebridge.Load(stateSibling(cfg.StateFile, "proxies.json"))
@@ -447,6 +462,7 @@ func main() {
 		SanitizeFingerprints:  cfg.Features.SanitizeBlacklistFingerprints,
 		EmbeddingsEnabled:     cfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled: cfg.Features.WatermarkStripEnabled,
+		ThreeDEnabled:         cfg.Features.ThreeDEnabled,
 		RecordClientInfo:      cfg.Logging.RequestClientInfo,
 		RecordContext:         cfg.Logging.RequestArchiveContext,
 		HiddenModels:          livecfg.NormalizeHiddenModels(cfg.Models.Hidden),
@@ -572,6 +588,8 @@ func main() {
 			log.Printf("WARN: task log archive: %v", err)
 		}
 	}
+	// 日志落盘在 Ring 的后台 goroutine 里做：退出前把排队的行写完（先于上面的 panelLogs.Close 执行）。
+	defer pn.Logs().Flush()
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 	// 成长任务队列排程的执行体在面板（队列逻辑唯一实现）：注入回调，避免 scheduler → panel 循环依赖。
@@ -623,9 +641,11 @@ func main() {
 		// 模型白名单原始条目（issue #68）；同上，运行期以 livecfg 快照为准。
 		ModelsAllowed: cfg.Models.Allowed,
 		// 模型映射原始条目（issue #30）；同上，运行期以 livecfg 快照为准。
-		ModelsAliases:    cfg.Models.Aliases,
-		AdminEnabled:     cfg.Admin.Enabled,
-		MetricsEnabled:   cfg.Metrics.Enabled,
+		ModelsAliases:  cfg.Models.Aliases,
+		AdminEnabled:   cfg.Admin.Enabled,
+		MetricsEnabled: cfg.Metrics.Enabled,
+		// 3D 开关的静态回退（运行期以 livecfg 快照为准，热生效）。
+		ThreeDEnabled:    cfg.Features.ThreeDEnabled,
 		Tasks:            sch,
 		Audit:            auditLog,
 		BudgetLimit:      cfg.Budget.DailyCreditLimit,
@@ -636,6 +656,9 @@ func main() {
 		RestrictionHold: time.Duration(cfg.Upstream.RestrictionHoldSeconds) * time.Second,
 		// 等上游首帧期间的 SSE 注释帧间隔（server.head_keepalive，缺省 1.5s）。
 		HeadKeepalive: cfg.HeadKeepaliveDur,
+		// 6020/6021 渠道排队：网关内先等一轮（features.busy_retry / busy_wait_seconds）。
+		BusyRetry:   cfg.Features.BusyRetry,
+		BusyWaitMax: time.Duration(cfg.Features.BusyWaitSeconds) * time.Second,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -854,6 +877,17 @@ func panelListenPath(listen string) string {
 	return listen
 }
 
+// configureThreeDCredentials 装配一次 3D 凭证来源；自动开关的变化需要重启。
+func configureThreeDCredentials(up *upstream.Client, cfg *Config) *upstream.StaticThreeDCredentials {
+	static := upstream.NewStaticThreeDCredentials(cfg.Features.ThreeDTempTokens)
+	if cfg.Features.ThreeDAutoToken {
+		up.ThreeDCredential = upstream.NewAutoThreeDCredentials(up.FetchClientTempKey, static)
+	} else {
+		up.ThreeDCredential = static
+	}
+	return static
+}
+
 // saveConfig 面板保存配置：校验 → 落盘 → 热应用 → 返回需重启的字段列表。
 //
 // 热生效范围（设计取舍）：
@@ -999,6 +1033,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		SanitizeFingerprints:  newCfg.Features.SanitizeBlacklistFingerprints,
 		EmbeddingsEnabled:     newCfg.Features.EmbeddingsEnabled,
 		WatermarkStripEnabled: newCfg.Features.WatermarkStripEnabled,
+		ThreeDEnabled:         newCfg.Features.ThreeDEnabled,
 		RecordClientInfo:      newCfg.Logging.RequestClientInfo,
 		RecordContext:         newCfg.Logging.RequestArchiveContext,
 		HiddenModels:          livecfg.NormalizeHiddenModels(newCfg.Models.Hidden),
@@ -1015,8 +1050,19 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		ModelFallback:          newCfg.Pool.ModelFallback,
 	})
 	up.SanitizeFingerprints.Store(newCfg.Features.SanitizeBlacklistFingerprints)
+	if up.ProxyPool != nil {
+		up.ProxyPool.SetExitLookup(newCfg.Features.ProxyExitLookup)
+	}
 	up.SanitizeBrandScope.Store(newCfg.Features.SanitizeBrandScope)
 	up.KeepRecentRounds.Store(int64(newCfg.Prompt.KeepRecentRounds))
+	// 3D 临时凭证热生效：面板保存后整体替换手工凭证表（内容不进日志）。
+	// 自动签发开关（three_d_auto_token）只在启动时装配，面板改了它要重启才生效。
+	if sc, ok := up.ThreeDCredential.(*upstream.StaticThreeDCredentials); ok {
+		sc.Replace(newCfg.Features.ThreeDTempTokens)
+	}
+	if au, ok := up.ThreeDCredential.(*upstream.AutoThreeDCredentials); ok {
+		au.ReplaceManual(newCfg.Features.ThreeDTempTokens)
+	}
 	// 思考档位策略热生效：改默认档 / 切换客户端优先或作用域后，下一次 chat 即按新策略。
 	up.SetEffortPolicy(effortPolicyOf(newCfg))
 	p.SetBreaker(newCfg.Pool.BreakerThreshold, newCfg.BreakerCooldownDur, newCfg.BreakerCooldownMaxD)
@@ -1107,6 +1153,7 @@ func restartRequiredFields(current, next *Config) []string {
 	changed("upstream.device_token", current.Upstream.DeviceToken, next.Upstream.DeviceToken)
 	changed("upstream.device_token_file", current.Upstream.DeviceTokenFile, next.Upstream.DeviceTokenFile)
 	changed("upstream.passthrough_ip", current.Upstream.PassthroughIP, next.Upstream.PassthroughIP)
+	changed("features.three_d_auto_token", current.Features.ThreeDAutoToken, next.Features.ThreeDAutoToken)
 	// cn.chat_base / cn.billing_base 同样只在装配期写进上游 client（请求路径并发读取，不做热改）。
 	changed("cn.chat_base", current.CN.ChatBase, next.CN.ChatBase)
 	changed("cn.billing_base", current.CN.BillingBase, next.CN.BillingBase)

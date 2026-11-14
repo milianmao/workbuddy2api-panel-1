@@ -854,6 +854,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   }
 
 .acc td.fl { line-height: 1.35; }
+/* 余额趋势：已失效账号的行整体降权。
+   它们**不参与统计**（已从合计里剔除），只作为历史记录陈列 —— 视觉上必须退到
+   背景，否则历史残留的余额会和活号争抢注意力（前注意加工层面）。 */
+.bh-dead { opacity: .45; }
+.bh-dead td { filter: grayscale(1); }
+.bh-sep td { padding: 6px 10px; font-size: 11.5px; color: var(--ink-3);
+  background: var(--surface-2); border-top: 1px solid var(--line); }
 .acc td.fl .fl-row { display: block; font-variant-numeric: tabular-nums; }
 .acc td.fl .fl-sub { font-size: 11.5px; color: var(--ink-3); }
 .fl-v { color: var(--ink-2); }
@@ -1768,6 +1775,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <input type="checkbox" name="embeddings_enabled"></div>
             <div class="hint">实验特性，默认关闭。上游嵌入模型与对话模型是两套注册表，实测只有 <code>bge-m3</code>（1024 维）可用；
               关闭时端点仍在但回 403 <code>embeddings_disabled</code>。改动即时生效。</div>
+            <div class="switch"><span class="lb">混元 3D 生成 /v1/3d/*</span>
+              <input type="checkbox" name="three_d_enabled"></div>
+            <div class="hint">实验特性，默认关闭。关闭时端点回 403 <code>three_d_disabled</code>，MCP 的
+              <code>generate_3d</code> / <code>get_3d_task</code> 也不会出现在工具面里。改动即时生效。
+              默认使用账号 access token 自动签发临时云凭证。也可手工配置
+              <code>features.three_d_temp_tokens</code>（键=账号 UID，<code>"*"</code> 兜底）覆盖自动签发；
+              该敏感字段不在本页面表单里，保存面板配置后热生效。只有自动签发不可用或已关闭、且没有手工凭证时，
+              才会回 503 <code>three_d_credential_missing</code>。自动签发开关需手工修改
+              <code>features.three_d_auto_token</code> 并重启。</div>
             <div class="switch"><span class="lb">会话粘性路由</span>
               <input type="checkbox" name="session_sticky_enabled"></div>
             <div class="hint" style="margin-top:10px">Upstash Redis 镜像、凭证目录与状态文件路径需手工编辑配置文件（判为重启项）。</div>
