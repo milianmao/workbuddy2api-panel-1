@@ -3134,25 +3134,32 @@ $('btnScanAll').onclick = async () => {
   } catch (e) { toast(e.message, 'err'); }
   finally { b.disabled = false; b.textContent = '扫描待办'; }
 };
-$('btnRunQueue').onclick = async () => {
+/* 启动执行队列：两个按钮共用一条链路。perAccount>0 时后端每号只排入 N 条待办
+   （「每号做 1 个」传 1，反复点逐轮推进）；0 = 旧行为，每号把待办做完。 */
+async function startQueueRun(btn, perAccount) {
   const conc = Number($('qcConc').value) || 1;
-  if (!confirm('扫描全部账号待办并排队执行（账号并发 ' + conc + '，账号内串行）。\n含真实对话的任务耗时较长，确认继续？')) return;
-  const b = $('btnRunQueue');
+  const cap = perAccount > 0 ? '，每号只做 ' + perAccount + ' 个待办' : '';
+  if (!confirm('扫描全部账号待办并排队执行（账号并发 ' + conc + '，账号内串行' + cap + '）。\n含真实对话的任务耗时较长，确认继续？')) return;
+  const label = btn.textContent;
   taskCenterOwner = 'queue';
-  b.disabled = true; b.textContent = '启动中…';
+  btn.disabled = true; btn.textContent = '启动中…';
   try {
-    const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify({ concurrency: conc }) });
+    const body = { concurrency: conc };
+    if (perAccount > 0) body.per_account = perAccount;
+    const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify(body) });
     if (!r.started) {
       if (r.scan_accounts) renderQueue(groupItems({ accounts: r.scan_accounts }), null, '未启动任务队列', r.message || '没有可自动执行的待办');
       toast(r.message || '没有可自动执行的待办', r.scan_error_count ? 'err' : '');
       return;
     }
     lastQueueSeq = r.seq || 0;
-    toast('队列已启动：' + r.total + ' 项（并发 ' + conc + '）', 'ok');
+    toast('队列已启动：' + r.total + ' 项（并发 ' + conc + cap + '）', 'ok');
     startQueuePolling();
   } catch (e) { toast(e.message, 'err'); }
-  finally { b.disabled = false; b.textContent = '执行全部待办'; }
-};
+  finally { btn.disabled = false; btn.textContent = label; }
+}
+$('btnRunQueue').onclick = () => startQueueRun($('btnRunQueue'), 0);
+$('btnRunQueueOne').onclick = () => startQueueRun($('btnRunQueueOne'), 1);
 // 扫描结果 → 分组条目（无执行状态）
 function groupItems(d) {
   const groups = [];

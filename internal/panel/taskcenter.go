@@ -6,6 +6,9 @@
 //   - 执行队列（run_queue + queue）：把待办项按账号分组排队执行——账号内
 //     串行（复用 per-account 锁，与单任务/一键完成互斥），账号间并发
 //     （concurrency 信号量限制，默认 1）。队列状态可轮询。
+//   - per_account（每号限 N）：run_queue 的可选参数，缺省 0 = 不限（旧行为）。
+//     面板「每号做 1 个」按钮传 1：每账号本轮只排一条待办，靠反复点逐轮推进，
+//     不再一次性把每号能做的任务全做完。
 package panel
 
 import (
@@ -203,10 +206,14 @@ func (p *Panel) growthQueueConcurrency() int {
 	return n
 }
 
-// tasksRunQueue 面板入口：启动执行队列（{concurrency:1-4}）。
+// tasksRunQueue 面板入口：启动执行队列（{concurrency:1-4, per_account:0=不限}）。
+//
+// per_account 是「每号做几个」：缺省 0 保持旧行为（每号把全部待办做完）；1 供面板
+// 「每号做 1 个」按钮使用——每账号本轮只排一条待办，靠反复点逐轮推进。
 func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Concurrency int `json:"concurrency"`
+		PerAccount  int `json:"per_account"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.Concurrency < 1 {
@@ -215,8 +222,11 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	if body.Concurrency > 4 {
 		body.Concurrency = 4
 	}
-	started, total, seq, msg, scanAccounts, scanErrorCount := p.startGrowthQueue(body.Concurrency, false)
-	result := map[string]any{"scan_accounts": scanAccounts, "scan_error_count": scanErrorCount}
+	if body.PerAccount < 0 {
+		body.PerAccount = 0
+	}
+	started, total, seq, msg, scanAccounts, scanErrorCount := p.startGrowthQueue(body.Concurrency, body.PerAccount, false)
+	result := map[string]any{"scan_accounts": scanAccounts, "scan_error_count": scanErrorCount, "per_account": body.PerAccount}
 	switch {
 	case seq == -1:
 		writeErr(w, http.StatusConflict, msg)
@@ -265,7 +275,9 @@ func (p *Panel) RunGrowthQueueNow() (int, string) {
 // 提示文案, 扫描结果, 扫描错误账号数)。面板「执行队列」与 growth 排程共用同一队列
 // 状态与同一把 per-account 锁。先扫描，把成长待办按账号内 autoActions 顺序排队。
 // 账号内串行，账号间受并发限制。notify=true 时执行结束发结果汇总。
-func (p *Panel) startGrowthQueue(concurrency int, notify bool) (started bool, total int, seq int, msg string, scanAccounts []scanAccountItem, scanErrorCount int) {
+// perAccount>0 时每号只排入前 N 条候选（先按「零消耗领奖优先 + 上轮打空的让位」重排），
+// 返回的 total 是本轮实际排入的条数。
+func (p *Panel) startGrowthQueue(concurrency, perAccount int, notify bool) (started bool, total int, seq int, msg string, scanAccounts []scanAccountItem, scanErrorCount int) {
 	if p.cfg.Pool == nil || p.cfg.Upstream == nil {
 		return false, 0, 0, "账号池未接线", nil, 0
 	}
@@ -330,13 +342,17 @@ func (p *Panel) startGrowthQueue(concurrency int, notify bool) (started bool, to
 		}
 	}
 
-	// 组装队列（账号分组，保持顺序）。
-	var items []queueItem
-	for _, one := range accts {
-		for _, t := range one.grow {
-			items = append(items, queueItem{UID: one.a.UID, Nickname: one.a.Nickname, Kind: "growth", Code: t.TaskCode, Title: t.Title, Status: "pending"})
+	// 每号限 N 时先重排候选：不重排的话每轮都从同一支任务开始，卡在
+	// awaiting_progress 的那条会反复吃掉每号唯一的名额，后面的任务永远轮不到。
+	if perAccount > 0 {
+		prev := q.prevStatusByAccount()
+		for i := range accts {
+			sortGrowthPicks(accts[i].grow, prev[accts[i].a.UID])
 		}
 	}
+
+	// 组装队列（账号分组，保持顺序；perAccount>0 时每号只取前 N 条）。
+	items, trimmed := buildQueueItems(accts, perAccount)
 	if len(items) == 0 {
 		log.Printf("panel: 队列启动：没有已确认可执行的成长待办（扫描错误 %d 个账号）", scanErrorCount)
 		q.mu.Lock()
@@ -358,7 +374,7 @@ func (p *Panel) startGrowthQueue(concurrency int, notify bool) (started bool, to
 	q.mu.Unlock()
 
 	go p.runQueueItems(accts, items, concurrency, notify)
-	log.Printf("panel: 队列启动：%d 项（并发 %d）", len(items), concurrency)
+	log.Printf("panel: 队列启动：%d 项（并发 %d%s）", len(items), concurrency, perAccountNote(perAccount, trimmed))
 	return true, len(items), seq, "", scanAccounts, scanErrorCount
 }
 
@@ -413,6 +429,93 @@ func (p *Panel) notifyQueueSummary(sum string) {
 		return
 	}
 	p.notifier("growth 队列 " + sum)
+}
+
+// ---------------------------------------------------------------------------
+// 每号限量（per_account）：候选挑选与队列组装
+// ---------------------------------------------------------------------------
+
+// growthPickRank 每号限 N 时单条候选的挑选优先级（越小越先）：
+//   - 0 进度已达标只差领奖：零对话消耗、直接到账，先拿。领奖失败（claim_pending）
+//     的进度通常已达标，自然落这一档，下轮重排后仍排最前；
+//   - 1 有自动化动作、上轮没试过（同档内沿用 autoActions 依赖序）；
+//   - 2 有自动化动作、但上轮跑过又回到待办（awaiting_progress / error）：让给没试过
+//     的，否则卡住的那条会反复吃掉每号唯一的名额，后面的任务永远轮不到；
+//   - 3 其余（growthPending 已过滤掉这种情况，留作兜底）。
+//
+// 只在 perAccount>0 时使用：不限量时仍按纯依赖序排队，保持既有行为。
+func growthPickRank(t upstream.Task, prevStatus string) int {
+	if taskProgressReached(&t) {
+		return 0
+	}
+	if autoActionFor(t.TaskCode) != nil {
+		switch prevStatus {
+		case "awaiting_progress", "error":
+			return 2
+		}
+		return 1
+	}
+	return 3
+}
+
+// sortGrowthPicks 按挑选优先级稳定重排该账号的待办（同档保持 autoActions 依赖序）。
+// prev 是上轮该账号 task_code→执行状态（无上轮时为 nil）。
+func sortGrowthPicks(grow []upstream.Task, prev map[string]string) {
+	sort.SliceStable(grow, func(i, j int) bool {
+		ri := growthPickRank(grow[i], prev[grow[i].TaskCode])
+		rj := growthPickRank(grow[j], prev[grow[j].TaskCode])
+		if ri != rj {
+			return ri < rj
+		}
+		return autoActionIndex(grow[i].TaskCode) < autoActionIndex(grow[j].TaskCode)
+	})
+}
+
+// buildQueueItems 把每账号待办摊平成队列条目（账号分组、账号内保持传入顺序）。
+// perAccount>0 时每号只保留前 N 条；trimmed 是本轮因此没排进去的条数（日志用）。
+func buildQueueItems(accts []queueAccount, perAccount int) (items []queueItem, trimmed int) {
+	for _, one := range accts {
+		grow := one.grow
+		if perAccount > 0 && len(grow) > perAccount {
+			trimmed += len(grow) - perAccount
+			grow = grow[:perAccount]
+		}
+		for _, t := range grow {
+			items = append(items, queueItem{UID: one.a.UID, Nickname: one.a.Nickname, Kind: "growth", Code: t.TaskCode, Title: t.Title, Status: "pending"})
+		}
+	}
+	return items, trimmed
+}
+
+// prevStatusByAccount 上一轮各账号每条待办的结果（uid → task_code → status）。
+// 只读上一轮的 q.items（每轮启动时整体替换），供每号限量挑选候选时避开打空的任务。
+func (q *queueState) prevStatusByAccount() map[string]map[string]string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return nil
+	}
+	out := make(map[string]map[string]string, len(q.items))
+	for _, it := range q.items {
+		if it.Kind != "growth" {
+			continue
+		}
+		m := out[it.UID]
+		if m == nil {
+			m = make(map[string]string, 4)
+			out[it.UID] = m
+		}
+		m[it.Code] = it.Status
+	}
+	return out
+}
+
+// perAccountNote 队列启动日志里「每号限 N」的说明后缀（不限时为空串）。
+func perAccountNote(perAccount, trimmed int) string {
+	if perAccount <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("，每号最多 %d 个，本轮未排入 %d 个", perAccount, trimmed)
 }
 
 // runQueueItems 队列执行主体：按账号分组，账号内串行（per-account 锁），

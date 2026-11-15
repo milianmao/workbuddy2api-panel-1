@@ -148,3 +148,54 @@ func TestAutoActionsSyncWithFrontend(t *testing.T) {
 		t.Errorf("前端 AUTO_TASKS 有、后端 autoActions 缺 %v —— 按钮能点但后端会返回无动作", extra)
 	}
 }
+
+// TestQueueRunPerAccountButton 钉住「每号做 1 个」：按钮必须在，且两个按钮共用
+// startQueueRun——只有限量按钮把 per_account=1 放进请求体，旧的「执行全部待办」
+// 请求体必须逐字不变（缺省不限量是线上既有行为，不能顺手改掉）。
+func TestQueueRunPerAccountButton(t *testing.T) {
+	html, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(html), `id="btnRunQueueOne"`) {
+		t.Fatal(`index.html 缺少「每号做 1 个」按钮 id="btnRunQueueOne"`)
+	}
+
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node unavailable")
+	}
+	script := `const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const src=fs.readFileSync(process.argv[2],'utf8');
+const start=src.indexOf('async function startQueueRun('),end=src.indexOf('// 扫描结果 → 分组条目');
+assert(start>=0&&end>start,'app.js 缺少 startQueueRun 或切片锚点漂移');
+const btns={btnRunQueue:{textContent:'执行全部待办',disabled:false},btnRunQueueOne:{textContent:'每号做 1 个',disabled:false},qcConc:{value:'2'}};
+const sent=[],toasts=[];
+const ctx={$:id=>btns[id],confirm:()=>true,toast:(m)=>toasts.push(m),renderQueue(){},startQueuePolling(){},
+ groupItems:()=>({}),taskCenterOwner:'',lastQueueSeq:0,
+ api:async(path,opt)=>{sent.push({path:path,body:JSON.parse(opt.body)});return{started:true,total:3,seq:7}}};
+vm.createContext(ctx);vm.runInContext(src.slice(start,end),ctx);
+(async()=>{
+ await btns.btnRunQueueOne.onclick();
+ assert.equal(sent.length,1);
+ assert.equal(sent[0].path,'tasks/run_queue');
+ assert.equal(sent[0].body.per_account,1,'限量按钮必须带 per_account=1');
+ assert.equal(sent[0].body.concurrency,2);
+ assert(toasts[0].includes('每号只做 1 个待办'),'限量模式的提示要讲清每号只做 1 个: '+toasts[0]);
+ assert.equal(btns.btnRunQueueOne.textContent,'每号做 1 个','执行结束必须还原按钮文案');
+ assert.equal(btns.btnRunQueueOne.disabled,false);
+ await btns.btnRunQueue.onclick();
+ assert.equal(sent.length,2);
+ assert.equal(sent[1].body.per_account,undefined,'旧按钮不能带 per_account（保持不限量）');
+ assert.equal(sent[1].body.concurrency,2);
+ assert.equal(btns.btnRunQueue.textContent,'执行全部待办');
+ console.log('queue per-account checks passed');
+})().catch(e=>{console.error(e);process.exit(1)});`
+	path := filepath.Join(t.TempDir(), "queue-peraccount.cjs")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, path, "app.js").CombinedOutput(); err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
