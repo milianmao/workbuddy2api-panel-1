@@ -63,3 +63,52 @@ func TestAppJSImportPreviewsBeforeCommit(t *testing.T) {
 		t.Fatal("选择文件时不得直接写入：写入必须发生在「确认导入」之后")
 	}
 }
+
+// 「确认导入」是 index.html 里的静态按钮，disabled / 文案不会随视图重建而复位。
+// 2026-11-15 实机故障：成功导入一批之后，本次页面里再选文件，按钮正常显示但点不动
+// （CSS button:disabled{opacity:.5}，浏览器直接不派发 click），只能刷新页面。
+//
+// 变异判据：把下面任意一处 `disabled = false` 删掉、或把收尾还原整段删掉，本用例就红。
+func TestAppJSImportCommitButtonRecovers(t *testing.T) {
+	raw, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(raw)
+
+	const reenable = "$('btnImportCommit').disabled = false;"
+	if n := strings.Count(js, reenable); n < 3 {
+		t.Fatalf("重置「确认导入」disabled 的地方只有 %d 处，至少要 3 处"+
+			"（重新选文件 / 预览通过 / 点击收尾）", n)
+	}
+
+	click := strings.Index(js, "$('btnImportCommit').onclick")
+	if click < 0 {
+		t.Fatal("app.js 找不到 btnImportCommit.onclick")
+	}
+	body := js[click:]
+	if end := strings.Index(body, "\n};"); end >= 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "btn.disabled = true;") {
+		t.Fatal("点击「确认导入」必须先置灰，防重复提交")
+	}
+	if !strings.Contains(body, "btn.disabled = false;") {
+		t.Fatal("点击路径收尾必须把 disabled 还原，否则一次导入后按钮永久点不动")
+	}
+	if !strings.Contains(body, "btn.textContent = '确认导入';") {
+		t.Fatal("点击路径收尾必须把文案还原，否则会停在「导入中…」")
+	}
+	if strings.Index(body, "btn.disabled = false;") < strings.Index(body, "btn.disabled = true;") {
+		t.Fatal("还原必须发生在置灰之后")
+	}
+
+	// 连续第二次导入的第一步：重新选文件时就要复位。
+	change := strings.Index(js, "$('importFile').onchange")
+	if change < 0 || click < change {
+		t.Fatal("app.js 找不到 importFile.onchange")
+	}
+	if !strings.Contains(js[change:click], reenable) {
+		t.Fatal("重新选文件时必须复位「确认导入」的 disabled（连续导入的入口）")
+	}
+}

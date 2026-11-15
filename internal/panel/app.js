@@ -2454,6 +2454,9 @@ function openAdd() {
   $('addQr').hidden = true; $('addQr').innerHTML = ''; // 上一次的 state 已作废，二维码不留
   $('btnStartLogin').hidden = false; $('btnStartLogin').disabled = false;
   $('btnAddApiKey').hidden = true;
+  // 「确认导入」是 index.html 里的静态按钮：上一次成功导入会把 disabled 留在元素上，
+  // 页面不重载就不消失，重开弹窗后看着在、点不动。这里一并还原。
+  $('btnImportCommit').disabled = false; $('btnImportCommit').textContent = '确认导入';
   stopPoll();
 }
 function switchAddTab(tab) {
@@ -2610,6 +2613,8 @@ $('importFile').onchange = async () => {
   importPending = null;
   $('importPreview').hidden = true;
   $('btnImportCommit').hidden = true;
+  // 上一批导入成功后会留下 disabled /「导入中…」，不还原就是「看得见、点不动」。
+  $('btnImportCommit').disabled = false; $('btnImportCommit').textContent = '确认导入';
   if (!files.length) return;
   // 导入是不可逆动作（覆盖已有凭据前还要过上游校验），所以分两步：选中文件后先
   // 发一次 dryRun 预览——服务端只做解析、必填、uid 合法性与批内去重，不落盘、
@@ -2627,6 +2632,7 @@ $('importFile').onchange = async () => {
     importPending.ready = true;
     renderImportPreview(label, d);
     $('btnImportCommit').hidden = false;
+    $('btnImportCommit').disabled = false;
   } catch (e) {
     importPending = null;
     $('importPreview').innerHTML = '<div class="hint" style="color:var(--warn)">校验失败，未导入任何账号：' + esc(e.message) + '</div>';
@@ -2637,6 +2643,8 @@ $('btnImportCommit').onclick = async () => {
   if (!importPending || !importPending.ready) return;
   const btn = $('btnImportCommit');
   btn.disabled = true;
+  // 覆盖项要先用 refresh 向上游求证（最长 verifyImportBudget 60s），按钮上得看得见在干什么。
+  btn.textContent = '导入中…';
   const label = importPending.files.length > 1 ? importPending.files.length + ' 个文件' : importPending.files[0].name;
   try {
     const d = await postImport(false);
@@ -2658,6 +2666,10 @@ $('btnImportCommit').onclick = async () => {
   }
   invalidatePackages();
   loadOverview(true);
+  // 收尾还原：成功分支只把按钮 hidden 掉，disabled /「导入中…」若留在静态元素上，
+  // 本次页面里再导入就是「看得见、点不动」（2026-11-15 实机故障）。
+  btn.disabled = false;
+  btn.textContent = '确认导入';
   $('importFile').value = '';
 };
 
