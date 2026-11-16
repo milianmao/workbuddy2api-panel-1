@@ -286,6 +286,13 @@ type entry struct {
 	// 鉴权，只用于面板按组筛选与组内批量操作）。空 = 未分组。持久化（state.json）。
 	group  string
 	reason string
+	// 模型规则（面板「模型规则」页）：一批模型的黑/白名单，挂到账号上即刻影响选号。
+	// ruleIDs 是持久化的引用（落 state.json）；*Deny/*Allow 是 recomputeRulesLocked
+	// 从规则本体展开的运行态集合，读时无需再查规则表。
+	ruleIDs      []string
+	ruleDeny     map[string]struct{}
+	ruleAllow    map[string]struct{}
+	ruleHasAllow bool
 	// disabledAt 禁用时刻（零值 = 未禁用）。与 reason 配对：运维需要知道
 	// 「什么时候被禁的」——同样一句 401，是刚刚发生还是挂了一周，处置完全不同。
 	disabledAt time.Time
@@ -486,6 +493,11 @@ func (e *entry) healthyForModel(now time.Time, reqModel string) bool {
 	if e.modelOffed(reqModel) {
 		return false
 	}
+	// 模型规则（黑/白名单）：与手动单点开关取并集，同样是「运维意图优先于自动冷却」。
+	// 放这里而不是 filteredLocked：选号按账号逐个判可用性，规则要影响的就是这一层。
+	if e.blockedByRules(reqModel) {
+		return false
+	}
 	if e.modelCooled(now, reqModel) {
 		// 该模型在 6004 独立冷却中 → 不可选。
 		return false
@@ -583,7 +595,9 @@ type stateAccount struct {
 	Hold bool `json:"hold,omitempty"`
 	// ProxyID 账号绑定的出站代理节点（proxypool.Node.ID；空 = 直连）。持久化：
 	// 绑定关系是运维意图，重启不该丢。老 state.json 无此字段 → 零值直连，零迁移。
-	ProxyID      string    `json:"proxy_id,omitempty"`
+	ProxyID string `json:"proxy_id,omitempty"`
+	// ModelRules 该账号挂的模型规则 id（持久化；规则本体在 stateFile.ModelRules）。
+	ModelRules   []string  `json:"model_rules,omitempty"`
 	Reason       string    `json:"reason,omitempty"`
 	DisabledAt   time.Time `json:"disabled_at,omitempty"` // 禁用时刻（持久化：重启后仍能看出禁了多久）
 	Until        time.Time `json:"until,omitempty"`
@@ -673,6 +687,9 @@ type stateModelCost struct {
 // stateFile 持久化格式。
 type stateFile struct {
 	Accounts map[string]stateAccount `json:"accounts"`
+	// ModelRules 模型规则表。与账号的 model_rules 引用分开存：规则可被多账号共用，
+	// 改一次所有挂它的账号立刻生效（不想让改规则变成逐账号的批量写）。
+	ModelRules []ModelRule `json:"model_rules,omitempty"`
 	// Parked 被账号目录热重载暂存的号（pool.go parked）。与 accounts 分开：它们不在池里，
 	// 文件回来时才重新入池，禁用/暂停/分组随之复活。缺省省略，旧文件照常读。
 	Parked map[string]stateAccount `json:"parked_accounts,omitempty"`

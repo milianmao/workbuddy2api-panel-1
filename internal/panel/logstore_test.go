@@ -91,12 +91,11 @@ func TestLogStoreRotatesOnMaxBytes(t *testing.T) {
 // TestLogStoreBackfillNewestFirst 回填按时间升序返回最近的 limit 条。
 func TestLogStoreBackfillNewestFirst(t *testing.T) {
 	dir := t.TempDir()
-	// 日期必须相对「今天」算，不能写死：下面重建 store 会跑 NewLogStore 的保留期清理
-	// （cutoff = 今天 - retentionDays），写死的历史日期过几天就掉出保留期被删掉，
-	// 回填条数随之变少 —— 这是纯时间炸弹，与回填逻辑无关（2026-11-16 起必红）。
-	oldDay := cst.Now().AddDate(0, 0, -1).Format("2006-01-02") // 昨天
-	newDay := cst.Now().Format("2006-01-02")                   // 今天
 	s := NewLogStore(dir, 7, 0)
+	// 日期相对今天：重开时 NewLogStore 按真实时钟清理保留期外的文件，写死绝对日期
+	// 会在保留期过期的第一天就变红（2026-11-16 起 CI 一直红的就是这条）。
+	oldDay := cst.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	newDay := cst.Now().Format("2006-01-02")
 	for i := 0; i < 5; i++ {
 		s.Append(LogEntry{TS: dayTS(oldDay, 10).Add(time.Duration(i) * time.Minute), Ch: ChSys, Text: "old-" + string(rune('0'+i))})
 	}

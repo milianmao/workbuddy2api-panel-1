@@ -114,7 +114,7 @@ try {
 		t.Fatal(err)
 	}
 	hf.Close()
-	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages"} {
+	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages", "#modelrules"} {
 		cmd := exec.Command(node, hf.Name(), "app.js")
 		cmd.Dir = "." // 测试工作目录 = internal/panel
 		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
@@ -1465,11 +1465,19 @@ if (start < 0) throw new Error('packages cache not found in app.js');
 let fakeNow = 1700000000000;
 class FakeDate extends Date { static now() { return fakeNow; } }
 const els = {}, calls = [], rendered = [];
-const el = (id) => (els[id] = els[id] || { textContent: '', innerHTML: '' });
+const el = (id) => (els[id] = els[id] || {
+  textContent: '', innerHTML: '', hidden: false, value: '', disabled: false, checked: false,
+  dataset: {}, style: {},
+  classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+  addEventListener() {}, removeEventListener() {}, focus() {}, click() {},
+  querySelector: () => null, querySelectorAll: () => [],
+});
 let failNext = false;
 const ctx = {
   Date: FakeDate, Math, JSON, Promise, Number, String,
   $: el,
+  // 抽取范围是「let lastPackages …文件末尾」，上游的顶层注册语句也会执行。
+  document: { querySelectorAll: () => [], querySelector: () => null, addEventListener() {}, getElementById: id => el(id) },
   api: async (p) => {
     calls.push(p);
     if (p === 'packages' && failNext) { failNext = false; throw new Error('boom'); }

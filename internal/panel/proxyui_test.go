@@ -55,10 +55,15 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 const html = fs.readFileSync(process.argv[3], 'utf8');
 
 const els = {};
+// 桩面要够宽：app.js 是从中间切到文件末尾来跑的，上游新加的顶层注册语句
+// （$('accPickList').addEventListener(...)、document.querySelectorAll(...)）也会执行。
 function el(id) {
   if (!els[id]) els[id] = {
-    id, innerHTML: '', textContent: '', hidden: false, value: '', disabled: false,
-    classList: { add() {}, remove() {} }, focus() {},
+    id, innerHTML: '', textContent: '', hidden: false, value: '', disabled: false, checked: false,
+    dataset: {}, style: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    focus() {}, click() {}, addEventListener() {}, removeEventListener() {}, appendChild() {},
+    querySelector: () => null, querySelectorAll: () => [],
   };
   return els[id];
 }
@@ -72,7 +77,8 @@ const ctx = {
   encodeURIComponent,
   LS_KEY: 'wb2api.key',
   localStorage: { getItem: () => null, setItem() {} },
-  document: { querySelector: () => (pickValue == null ? null : { value: pickValue }) },
+  document: { querySelector: () => (pickValue == null ? null : { value: pickValue }),
+    querySelectorAll: () => [], addEventListener() {}, getElementById: id => el(id) },
   confirm: msg => { calls.push({ confirm: msg }); return confirmAnswer; },
   remarkOf: () => '',
   // u1/u2 绑 p1，u3 绑 p2 —— 覆盖「单号预选 / 多号一致 / 多号不一致」三种场景。
