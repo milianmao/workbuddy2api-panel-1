@@ -119,8 +119,11 @@ type continueReader struct {
 
 	starvedTried bool // 空截断救援已用（每请求一次；见 tryStarvedRetry）
 
-	// narrationTried 预告式收尾的救援续写已用（每请求一次；见 tryNarrationRetry）。
-	narrationTried bool
+	// narrationTries 预告式收尾的救援续写已用次数（上限 narrationMaxRescues；
+	// 见 tryNarrationRetry）。上限 2 而不是 1：长正文的模型常常连写两段预告
+	// （"我先说明结论，然后我将开始修改…"，再停一次），只给一次机会等于第二段
+	// 又回到客户端手上——issue #245 的真实形态。总量仍由 outputCap 兜底。
+	narrationTries int
 
 	// toolOnlyTried 安全续写（只采纳工具调用）已用（每请求一次；见 tryToolOnlyRescue）。
 	toolOnlyTried bool
@@ -139,6 +142,14 @@ type continueReader struct {
 	origTail   []string
 
 	lastClientAt time.Time // 上次客户端可见输出/keepalive 的时刻（静默节流）
+
+	// segSawDone 当前段是否以 [DONE] 收尾：换段失败时按它决定收尾形态。
+	segSawDone bool
+
+	// pending 在途的换段请求（见 openSegmentAsync）。非 nil 时 Read() 不再读旧段，
+	// 而是轮询它并在等待期间补 keepalive——换段是一次完整的上游 POST，同步等待会让
+	// 客户端在整个 TTFB（3~30s）里零字节，触发流式 idle 超时。
+	pending *pendingSeg
 
 	// readErr 本段结束时的读错误（nil = 上游 [DONE] 正常收尾）。用于区分「上游
 	// 断流」与「客户端先断开」——两者的 err 都是非 nil，但归因完全不同：后者是
@@ -249,6 +260,11 @@ func (r *continueReader) Close() error {
 // `data: [DONE]` 段结束；`data: <payload>` 帧；其他非空行原样透传；空行吞掉
 // （帧分隔由本层自产 "\n\n"）。
 func (r *continueReader) step() {
+	// 换段请求在途：先轮询它（顺带补 keepalive），拿到之前不读旧段。
+	if r.pending != nil {
+		r.pollPending()
+		return
+	}
 	line, err := r.br.ReadString('\n')
 	trimmed := strings.TrimRight(line, "\r\n")
 	switch {
@@ -503,12 +519,80 @@ func (r *continueReader) maybeKeepalive() {
 	r.lastClientAt = time.Now()
 }
 
+// pendingSeg 一次「换段」上游请求的在途状态。
+type pendingSeg struct {
+	ch      chan segOpenResult
+	sawDone bool // 触发换段的那一段是否以 [DONE] 收尾（失败收尾时要原样使用）
+	onOK    func(io.ReadCloser)
+	onFail  func(status int, err error)
+}
+
+type segOpenResult struct {
+	rc     io.ReadCloser
+	status int
+	err    error
+}
+
+// openSegmentAsync 异步发起换段请求（续写 / 救援 / 盲重试共用）。
+//
+// 为什么必须异步：ChatStreamContext 是一次完整的上游 POST（十万级 prompt 的 prefill
+// 常 3~15s，慢时 30s+）。同步调用会把 Read() 卡在这段窗口里，客户端一个字节都收不
+// 到——流式客户端有 idle 超时，静默到阈值就主动断开，用户看到的就是「说到一半突然
+// 中断」。Trae 那种单段直通没有这个窗口，同一客户端在两边表现不同，这也是原因之一。
+//
+// 返回 false 表示已有在途请求（不应发生，调用方按原路径继续）。
+func (r *continueReader) openSegmentAsync(body []byte, onOK func(io.ReadCloser), onFail func(int, error)) bool {
+	if r.pending != nil {
+		return false
+	}
+	ps := &pendingSeg{ch: make(chan segOpenResult, 1), sawDone: r.segSawDone, onOK: onOK, onFail: onFail}
+	r.pending = ps
+	go func() {
+		rc, status, _, err := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta, nil)
+		ps.ch <- segOpenResult{rc: rc, status: status, err: err}
+	}()
+	return true
+}
+
+// pollPending 轮询在途的换段请求：
+//   - 拿到且成功 → 交给 onOK 安装新段（调用方随后继续读）；
+//   - 拿到但失败 → onFail 记日志、按原段终态收尾（不等价于「没续写」，与同步版本一致）；
+//   - 还没拿到 → 按需补一条 ": keepalive" 注释帧，让客户端看到数据流动。
+func (r *continueReader) pollPending() bool {
+	ps := r.pending
+	if ps == nil {
+		return false
+	}
+	wait := keepaliveEvery
+	if wait <= 0 || wait > time.Second {
+		wait = time.Second
+	}
+	select {
+	case res := <-ps.ch:
+		r.pending = nil
+		if res.err == nil && res.status < 400 && res.rc != nil {
+			ps.onOK(res.rc)
+			return true
+		}
+		if res.rc != nil {
+			res.rc.Close()
+		}
+		ps.onFail(res.status, res.err)
+		r.finishStream(ps.sawDone)
+		return true
+	case <-time.After(wait):
+		r.maybeKeepalive()
+		return false
+	}
+}
+
 // endSegment 一段结束（DONE 或 EOF/读错误）时的决策：
 // 能续 → 换段继续读；否则回放 tail + 合成 usage 总计 + 结束。
 func (r *continueReader) endSegment(sawDone bool) {
 	if r.done {
 		return
 	}
+	r.segSawDone = sawDone
 	if r.cur != nil {
 		r.cur.Close()
 	}
@@ -533,8 +617,8 @@ func (r *continueReader) endSegment(sawDone bool) {
 		blind := !sawDone && r.finish == ""
 		body, err := r.continuationBody()
 		if err == nil {
-			rc, status, _, terr := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta, nil)
-			if terr == nil && status < 400 && rc != nil {
+			// 异步换段：等待期内客户端只会收到 keepalive，不会出现整段静默。
+			if r.openSegmentAsync(body, func(rc io.ReadCloser) {
 				r.seg++
 				if blind {
 					r.blindRetried = true
@@ -555,13 +639,12 @@ func (r *continueReader) endSegment(sawDone bool) {
 				r.finish, r.tail = "", nil
 				// 本段 usage 快照归零：下一段的思考/正文构成要重新测（见 segCompletion）。
 				r.segCompletion, r.segThink = 0, 0
+			}, func(status int, terr error) {
+				log.Printf("WARN: [continue] acct=%s seg=%d 续写失败（status=%d err=%v）→ 降级为截断终态",
+					logfmt.Label(r.acct.UID, r.acct.Nickname), r.seg+1, status, terr)
+			}) {
 				return
 			}
-			if rc != nil {
-				rc.Close()
-			}
-			log.Printf("WARN: [continue] acct=%s seg=%d 续写失败（status=%d err=%v）→ 降级为截断终态",
-				logfmt.Label(r.acct.UID, r.acct.Nickname), r.seg+1, status, terr)
 		} else {
 			log.Printf("WARN: [continue] acct=%s 续写请求体构造失败: %v",
 				logfmt.Label(r.acct.UID, r.acct.Nickname), err)
@@ -571,6 +654,16 @@ func (r *continueReader) endSegment(sawDone bool) {
 		// 把它当成「又在半句处断了」。
 		log.Printf("INFO: [continue] acct=%s 累计输出 %d token 已达上限 %d → 停止续写，按截断收尾",
 			logfmt.Label(r.acct.UID, r.acct.Nickname), int(r.totalOutput()), int(r.outputCap()))
+	}
+	r.finishStream(sawDone)
+}
+
+// finishStream 收尾：断流降级 → 回放 tail → 合成跨段合计 usage → [DONE] → 标记完成。
+// 从 endSegment 拆出来的原因：换段请求改成异步之后，失败路径（pollPending 里）也要走
+// 同一段收尾，两份实现迟早漂移。
+func (r *continueReader) finishStream(sawDone bool) {
+	if r.done {
+		return
 	}
 	// 段在没有任何 finish 的情况下以 EOF/读错误结束：疑似上游断流（正常收尾都带
 	// finish_reason）。客户端此前会看到「被标 completed 的中途截断」——这里把
@@ -613,7 +706,7 @@ func (r *continueReader) endSegment(sawDone bool) {
 	// 救援效果的可观测性：本次命中的是「预告句收尾」时，记录续写后到底拿到了什么。
 	// 没有这行就分不清「救回来是工具调用（回合继续）」和「只是多打了一段正文」——
 	// 线上实测命中率能到请求量的三成，必须能算清楚收益再决定判据要不要收。
-	if r.narrationTried {
+	if r.narrationTries > 0 {
 		log.Printf("[narration] acct=%s model=%s 结果：共 %d 段，工具调用=%v，正文合计=%dB",
 			logfmt.Label(r.acct.UID, r.acct.Nickname), bareModelOf(r.body), r.seg+1, r.toolSeen, r.text.Len())
 	}

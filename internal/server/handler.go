@@ -356,15 +356,23 @@ func NewHandler(cfg Config) *Handler {
 	return h
 }
 
-// isChatEntry 四条入站协议路径：/v1/responses 与 /v1/messages（含 /messages 别名）
-// 经 r.Clone 转进 chatCompletions 内核，与直连的 /v1/chat/completions 共用同一套
-// 行日志/归档/来源采集/X-Request-Id——四者一视同仁，别再按单路径放行（Codex 走
+// isChatEntry 需要挂 requestTrace 的入站路径（/v1/responses 与 /v1/messages（含 /messages
+// 别名）经 r.Clone 转进 chatCompletions 内核，与直连的 /v1/chat/completions 共用同一套
+// 行日志/归档/来源采集/X-Request-Id——一视同仁，别再按单路径放行（Codex 走
 // /v1/responses，曾因此整类请求无来源、不入归档）。
+//
+// 出图/出视频/3D 也在表里：它们不扣 chat 的 token，但同样按上游回执扣积分，
+// 不进台账就等于面板拿不到这笔钱（issue #249）——POST /v1/videos 与
+// /v1/videos/generations 是同一个 handler，曾只登记了后者。
+//
+// GET 的查询路径（/v1/videos/{id}、/content）刻意不在表里：ServeHTTP 只对 POST 挂
+// trace，轮询不扣费，进归档只会把一次生成摊成 N 条 0 积分记录。
 func isChatEntry(path string) bool {
 	switch path {
 	case "/v1/chat/completions", "/v1/responses", "/v1/messages", "/messages",
 		"/v1/images/generations", "/v1/images/edits",
-		"/v1/videos/generations", "/v1/videos/tasks", "/v1/3d/generations", "/v1/3d/tasks":
+		"/v1/videos", "/v1/videos/generations", "/v1/videos/tasks",
+		"/v1/3d/generations", "/v1/3d/tasks":
 		return true
 	}
 	return false
@@ -456,7 +464,43 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"global": countsMapFrom(h.cfg.Pool.CountsDetailedForRealm("global")),
 		},
 		"sticky_sessions": sticky,
-		"redis_mode":      redisMode,
+		// credits 顶层积分汇总：把「可用量」直接摊到接口根部，外部集成（如面板/费用
+		// 插件）不必自己遍历 accounts 再求和 —— 那种做法每个消费方都要重复实现，
+		// 且极易漏掉「禁用号的 credits 已是 0、credits_raw 是快照」的语义差别。
+		//
+		// available = 健康/冷却/暂停号的可用积分（禁用号已是 0）；
+		// snapshot  = 含禁用号快照的总量（= 把死钱也算进去的旧口径，仅供诊断对照）；
+		// quota     = 可用号的总额度。三者分开写，避免读者猜。
+		"credits": func() map[string]any {
+			var available, snapshot, quota int64
+			byRealm := map[string]map[string]int64{}
+			for _, st := range h.cfg.Pool.List() {
+				available += st.Credits
+				snapshot += st.CreditsRaw
+				if st.CreditsTotal > 0 {
+					quota += st.CreditsTotal
+				}
+				r := st.Realm
+				if r == "" {
+					r = "cn"
+				}
+				agg := byRealm[r]
+				if agg == nil {
+					agg = map[string]int64{}
+					byRealm[r] = agg
+				}
+				agg["available"] += st.Credits
+				agg["snapshot"] += st.CreditsRaw
+				agg["quota"] += st.CreditsTotal
+			}
+			return map[string]any{
+				"available": available,
+				"snapshot":  snapshot,
+				"quota":     quota,
+				"by_realm":  byRealm,
+			}
+		}(),
+		"redis_mode": redisMode,
 		// model_locks 当前有未过期模型级限流的 (域, 模型) 全清单（移植上游 PR #120）：
 		// accounts 回答「哪些号不能用」，本键回答「哪些模型不能用、锁了几个号、还要锁多久」。
 		// 与 ModelBlocked（请求失败时的单模型判定）互补；无锁时为 null。只增键，零回归。

@@ -31,6 +31,7 @@ package server
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"log"
 	"strings"
 
@@ -167,7 +168,7 @@ func lastMessageIsToolResult(body []byte) bool {
 // tryToolOnlyRescue 安全续写：只采纳工具调用，正文一律丢弃。
 func (r *continueReader) tryToolOnlyRescue() bool {
 	switch {
-	case r.toolOnlyTried, r.narrationTried, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
+	case r.toolOnlyTried, r.narrationTries > 0, r.errSeen, r.toolSeen, r.clientGone(), r.outputCapped():
 		return false
 	case r.finish != "stop":
 		return false
@@ -209,26 +210,22 @@ func (r *continueReader) tryToolOnlyRescue() bool {
 	r.toolOnlyTried = true
 	// 首段的终态帧先存起来：续写段如果只给正文，要原样回放这一份。
 	r.origFinish, r.origTail = r.finish, r.tail
-	rc, status, _, terr := r.up.ChatStreamContext(r.ctx, r.acct, body, r.clientIP, r.meta, nil)
-	if terr != nil || status >= 400 || rc == nil {
-		if rc != nil {
-			rc.Close()
-		}
+	// 异步换段：等待期内客户端只会收到 keepalive（见 openSegmentAsync）。
+	return r.openSegmentAsync(body, func(rc io.ReadCloser) {
+		r.seg++
+		r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
+		r.finish, r.tail = "", nil
+		r.toolOnly = true
+		r.toolOnlyFailed = false
+		r.toolCallBuf, r.toolCallNames, r.toolCallArgs = nil, nil, nil
+		r.segCompletion, r.segThink = 0, 0
+		log.Printf("[toolonly] acct=%s model=%s seg=%d 正文只有 %dB 就收尾（末条是工具结果）→ 试续一次，只采纳工具调用",
+			logfmt.Label(r.acct.UID, r.acct.Nickname), bareModelOf(r.body), r.seg, r.text.Len())
+	}, func(status int, terr error) {
 		r.origFinish, r.origTail = "", nil
 		log.Printf("WARN: [toolonly] acct=%s seg=%d 续写请求失败（status=%d err=%v）→ 按原样收尾",
 			logfmt.Label(r.acct.UID, r.acct.Nickname), r.seg+1, status, terr)
-		return false
-	}
-	r.seg++
-	r.cur, r.br = rc, bufio.NewReaderSize(rc, 64*1024)
-	r.finish, r.tail = "", nil
-	r.toolOnly = true
-	r.toolOnlyFailed = false
-	r.toolCallBuf, r.toolCallNames, r.toolCallArgs = nil, nil, nil
-	r.segCompletion, r.segThink = 0, 0
-	log.Printf("[toolonly] acct=%s model=%s seg=%d 正文只有 %dB 就收尾（末条是工具结果）→ 试续一次，只采纳工具调用",
-		logfmt.Label(r.acct.UID, r.acct.Nickname), bareModelOf(r.body), r.seg, r.text.Len())
-	return true
+	})
 }
 
 // toolOnlyFrame 「只采纳工具调用」段的全部 data 帧都走这里（frame() 入口改道）。
