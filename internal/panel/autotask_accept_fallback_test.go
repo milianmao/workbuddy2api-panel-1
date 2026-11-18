@@ -42,7 +42,10 @@ func newAcceptFallbackFake(tasks, mpTasks []string) *acceptFallbackFake {
 
 func (f *acceptFallbackFake) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		mp := r.Header.Get("X-Client-Platform") != ""
+		// 小程序口径按**取值**认（tasks.go 发的是 "miniprogram"），不能按「有这个头」认：
+		// 5.11.3 桌面端普通 RPC 也带 X-Client-Platform: windows（issue #257 真机抓包
+		// 155/155 全带），按有无判定会把桌面请求误判成 mp，列表就会去取 mpTasks（空）。
+		mp := r.Header.Get("X-Client-Platform") == "miniprogram"
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/activity/growth/tasks":
 			f.mu.Lock()
