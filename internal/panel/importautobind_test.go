@@ -265,3 +265,23 @@ func TestImportCockpitDryRunDoesNotBind(t *testing.T) {
 		t.Fatalf("预览时 auto_bind 应带 dry_run 标记: %+v", out.AutoBind)
 	}
 }
+
+// TestImportAutoBindSkipsInfoRows 机场会把套餐文案行一起塞进节点列表，它们拨得通但
+// 名字是信息；选点必须跳过（线上曾把一个号绑到「距离下次重置剩余：27 天」上）。
+func TestImportAutoBindSkipsInfoRows(t *testing.T) {
+	f := newProxyFixtureWith(t,
+		autoBindRaw("距离下次重置剩余：27 天", 1),
+		autoBindRaw("剩余流量：1.89 TB", 2),
+		autoBindRaw("🇸🇬新加坡高速03|BGP|CTCUCM", 3),
+	)
+	f.pn.cfg.Live = livecfg.New(livecfg.Snapshot{ImportAutoBindMaxPerProxy: 5})
+
+	res := f.pn.autoBindImported(newAccts("u-info", 1))
+	if res.Bound != 1 || res.Skipped != 0 {
+		t.Fatalf("应绑上 1 个：%+v", res)
+	}
+	real := f.nodeID(t, "🇸🇬新加坡高速03|BGP|CTCUCM")
+	if b := f.pp.Snapshot().Bindings["u-info-0"]; b.ProxyID != real {
+		t.Fatalf("应绑到真节点 %s，实际 %+v", real, b)
+	}
+}

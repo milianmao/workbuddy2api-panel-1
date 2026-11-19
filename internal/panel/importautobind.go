@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/misakano7545/workbuddy2api-panel/internal/nodebridge"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 )
 
@@ -99,9 +100,16 @@ func (p *Panel) autoBindImported(list []importAcct) importAutoBindResult {
 		if !v.Enabled || v.BoundCount >= cap {
 			continue
 		}
+		label := p.proxyLabel(v)
+		// 机场会把「距离下次重置剩余：27 天」这类套餐文案行一起塞进节点列表：它带的是
+		// 同一台机器的真配置、也拨得通，但对号来说是个假名字（线上真绑上过一次），
+		// 这种条目不能当选点。
+		if nodebridge.IsInfoOnlyTag(label) {
+			continue
+		}
 		ip := ipOf[v.ID]
 		cands = append(cands, &importBindCandidate{
-			id: v.ID, label: p.proxyLabel(v), ip: ip, count: v.BoundCount,
+			id: v.ID, label: label, ip: ip, count: v.BoundCount,
 			ipCount: ipBound[ip], healthy: v.Status == "healthy", latency: v.LatencyMS,
 		})
 	}

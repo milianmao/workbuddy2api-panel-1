@@ -28,13 +28,21 @@ type yamlDoc struct {
 // 只按前缀匹配，不做模糊匹配（免得误杀真节点）。
 func infoOnlyTag(name string) bool {
 	n := strings.TrimSpace(name)
-	for _, p := range []string{"剩余流量", "套餐到期", "到期时间", "过滤掉", "官网地址"} {
+	for _, p := range []string{"剩余流量", "套餐到期", "到期时间", "过滤掉", "官网地址",
+		// 「距离下次重置剩余：27 天」是同一套文案行的另一个写法：同样是「名字是信息、
+		// 配置是同一台机器」。2026-11-19 线上真的把某个号绑上去过（导入自动绑定选点
+		// 选中了它），所以前缀表补齐。
+		"距离下次重置", "下次重置", "重置剩余"} {
 		if strings.HasPrefix(n, p) {
 			return true
 		}
 	}
 	return false
 }
+
+// IsInfoOnlyTag 判断一行名字是不是机场塞在节点列表里的套餐文案（不是能用的出口）。
+// 面板侧的选点/绑定都要用同一份判据，免得两边各自维护一份前缀表。
+func IsInfoOnlyTag(name string) bool { return infoOnlyTag(name) }
 
 // ParseNodes 把订阅正文/手贴文本解析为 clash proxy map 列表（未校验）。
 func ParseNodes(text string) ([]map[string]any, error) {
