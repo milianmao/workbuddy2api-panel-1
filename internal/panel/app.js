@@ -2191,6 +2191,8 @@ const CFG_MAP = {
   update_proxy: ['update', 'proxy'], update_mirror: ['update', 'mirror'],
   update_proxy_from_env: ['update', 'proxy_from_env'],
   poll_interval_sec: ['panel', 'poll_interval_sec'],
+  import_auto_bind_proxy: ['panel', 'import_auto_bind_proxy'],
+  import_auto_bind_max_per_proxy: ['panel', 'import_auto_bind_max_per_proxy'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'], growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],

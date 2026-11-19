@@ -62,4 +62,9 @@ func TestConfigExampleIsValid(t *testing.T) {
 	if !c.Features.ThreeDAutoToken {
 		t.Error("features.three_d_auto_token 示例值应为 true（自动签发默认开启）")
 	}
+	// 导入后自动绑定代理（panel.import_auto_bind_*）：导入的号默认 hold，人肉启用那天
+	// 不该落回主机 IP 直连（11140 最高危的一档），所以默认开；两个键都要在示例里可见。
+	if !c.Panel.ImportAutoBindProxy || c.Panel.ImportAutoBindMaxPerProxy != 5 {
+		t.Errorf("panel.import_auto_bind_proxy / import_auto_bind_max_per_proxy 示例应为 true / 5: %+v", c.Panel)
+	}
 }

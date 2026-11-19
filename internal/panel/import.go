@@ -283,6 +283,18 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}
 
+	// 自动绑定代理：新号默认 hold（不进选号），但「人肉 resume 那天」不该再落回主机 IP
+	// 直连——直连是 11140 最高危的一档。放在上游动作之前，让签到/查余额这几跳顺便当成
+	// 新节点的一次真实出网验证。预览绝不写绑定。
+	var autoBind importAutoBindResult
+	if !dryRun && len(committed) > 0 {
+		autoBind = p.autoBindImported(committed)
+		if len(autoBind.Nodes) > 0 {
+			log.Printf("panel: import auto-bind 完成 bound=%d skipped=%d cap=%d nodes=%v",
+				autoBind.Bound, autoBind.Skipped, autoBind.Cap, autoBind.Nodes)
+		}
+	}
+
 	// 上游动作（签到/激活/查余额）放在落盘之后统一做：它们每号几次往返，
 	// 不能夹在求证与落盘之间拖慢已轮换令牌的提交。
 	for _, ia := range committed {
@@ -297,9 +309,15 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		log.Printf("panel: cockpit import finished total=%d imported=%d skipped=%d creates=%d overwrites=%d",
 			total, imported, skipped, creates, overwrites)
 	}
+	if dryRun {
+		// 预览只报告设置，不写任何绑定：与「预览绝不发上游请求」同一条纪律。
+		e, cp := p.importAutoBindSettings()
+		autoBind = importAutoBindResult{Enabled: e, Cap: cp, DryRun: true}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
 		"dry_run":    dryRun,
+		"auto_bind":  autoBind, // 导入后的自动绑定结果（enabled/cap/bound/skipped/nodes/reason）
 		"total":      total,
 		"imported":   imported, // dryRun 时是「将会导入」的条数
 		"skipped":    skipped,

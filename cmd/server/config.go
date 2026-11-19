@@ -38,6 +38,21 @@ type Config struct {
 		// 负值 = 关闭自动刷新（只在手动操作时更新）。账号多、或只是开着面板
 		// 当监控用时，调大间隔能显著降低浏览器与服务端负担。
 		PollIntervalSec int `json:"poll_interval_sec"`
+
+		// ImportAutoBindProxy 导入（cockpit 批量导入）成功后，自动给每个新号固定绑定
+		// 一个「当前绑定账号数 < import_auto_bind_max_per_proxy」的代理节点，缺省 true。
+		//
+		// 为什么默认开：导入的号默认 hold（不进选号），人肉 resume 那天就走默认出口，
+		// 而「直连主机 IP」是 11140「账号存在异常行为」最高危的一档（历史 12 个封禁号
+		// 里 6 个是直连）。导入时顺手绑好，比事后一个个补绑可靠。
+		//
+		// 没有空位时该号保持未绑定（回到 realm 默认 / 随机池 / 直连），绝不超发；覆盖
+		// 导入（号已在池里）不动它原有的绑定。热生效：面板保存后下一次导入即按新值走。
+		ImportAutoBindProxy bool `json:"import_auto_bind_proxy"`
+		// ImportAutoBindMaxPerProxy 每个节点允许绑定的账号上限，缺省 5。
+		// 5 的依据：43 个机场节点只对应约 30 个 distinct 出口 IP，一个出口上堆太多号会
+		// 一起进风控；节点级留余量后，选点还会按出口 IP 二次摊开。<=0 回落 5，上限 50。
+		ImportAutoBindMaxPerProxy int `json:"import_auto_bind_max_per_proxy"`
 	} `json:"panel"`
 
 	Update struct {
@@ -631,6 +646,9 @@ func Default() *Config {
 	c.Server.MaxPayloadBytes = 64 << 20
 	c.Upstream.RestrictionHoldSeconds = 1800
 	c.Panel.PackageDetailLimit = 5
+	// 导入后自动绑定代理（缺省开）+ 每节点绑定上限（缺省 5，见 panel 段注释）。
+	c.Panel.ImportAutoBindProxy = true
+	c.Panel.ImportAutoBindMaxPerProxy = 5
 	c.Update.AutoTime = "04:00"
 	// 账号目录热重载（issue #199）：默认 10s 轮询、连续 2 次确认才删。
 	c.Accounts.ReloadInterval = "10s"
@@ -1055,6 +1073,13 @@ func (c *Config) normalize() error {
 	}
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
+	}
+	// 自动绑定的每节点上限：非正数回落缺省，过大钳到 50（再大等于不限，失去意义）。
+	if c.Panel.ImportAutoBindMaxPerProxy <= 0 {
+		c.Panel.ImportAutoBindMaxPerProxy = 5
+	}
+	if c.Panel.ImportAutoBindMaxPerProxy > 50 {
+		c.Panel.ImportAutoBindMaxPerProxy = 50
 	}
 	if c.Watchdog.IntervalSeconds <= 0 {
 		c.Watchdog.IntervalSeconds = 3600

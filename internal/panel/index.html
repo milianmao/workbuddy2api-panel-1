@@ -1615,6 +1615,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <label class="fld"><span class="lb">面板自动刷新间隔（秒）</span>
               <input name="poll_interval_sec" type="number" placeholder="0">
               <span class="hint">0 = 缺省 5 秒；负数 = 关闭自动刷新（仅手动更新）。页面切到后台时自动暂停。</span></label>
+            <div class="grid2">
+              <div>
+                <label class="switch"><span class="lb">导入后自动绑定代理</span>
+                  <input type="checkbox" name="import_auto_bind_proxy"></label>
+                <span class="hint">批量导入的新号各绑一个「绑定数未满」的节点，优先按出口 IP 摊开；没有空位就保持未绑定（走默认出口）。</span>
+              </div>
+              <label class="fld"><span class="lb">每节点绑定上限</span>
+                <input name="import_auto_bind_max_per_proxy" type="number" min="1" max="50" placeholder="5">
+                <span class="hint">缺省 5。达到上限的节点不再分配新号；热生效，下次导入即按新值走。</span></label>
+            </div>
           </div>
         </div>
 

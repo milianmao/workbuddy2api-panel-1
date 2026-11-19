@@ -11,7 +11,9 @@
   },
   "panel": {
     "package_detail_limit": 5,
-    "poll_interval_sec": 0
+    "poll_interval_sec": 0,
+    "import_auto_bind_proxy": true,
+    "import_auto_bind_max_per_proxy": 5
   },
   "update": {
     "auto_enabled": false,
