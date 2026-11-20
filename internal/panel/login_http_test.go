@@ -61,7 +61,7 @@ func TestDoJSONRetriesTransportFailure(t *testing.T) {
 	loginHTTP = &http.Client{Timeout: 5 * time.Second}
 	defer func() { loginHTTP = old }()
 
-	data, status, err := doJSON(context.Background(), nil, http.MethodPost, srv.URL, nil, bytes.NewReader([]byte("{}")), siteForRealm("cn"))
+	data, status, err := doJSON(loginRoute{}, context.Background(), http.MethodPost, srv.URL, nil, bytes.NewReader([]byte("{}")), siteForRealm("cn"))
 	if err != nil {
 		t.Fatalf("传输失败后应重试成功，实际 err=%v status=%d", err, status)
 	}
@@ -97,7 +97,7 @@ func TestDoJSONDoesNotRetryBusinessError(t *testing.T) {
 	loginHTTP = &http.Client{Timeout: 5 * time.Second}
 	defer func() { loginHTTP = old }()
 
-	_, status, err := doJSON(context.Background(), nil, http.MethodGet, srv.URL, nil, nil, siteForRealm("cn"))
+	_, status, err := doJSON(loginRoute{}, context.Background(), http.MethodGet, srv.URL, nil, nil, siteForRealm("cn"))
 	if err == nil {
 		t.Fatal("业务错误应返回 err")
 	}

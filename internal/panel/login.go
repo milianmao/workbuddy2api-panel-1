@@ -29,6 +29,7 @@ import (
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/loginsite"
+	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
@@ -202,12 +203,11 @@ const loginAttempts = 3
 // doJSON 发一次 JSON 请求并解信封，遇纯传输失败按 loginAttempts 重试。
 // site 决定头族与 UA（真机形态，见 commonHeaders）；extra 为端点差异头
 // （state 的 x-device-token / 哨兵、account 的 Bearer 等），在公共头之后覆盖写入，
-// nil 表示只发公共头。
+// nil 表示只发公共头。route 决定出站出口（见 loginRoute）。
 //
-// client 是本次登录会话的出口（指定代理时由 loginProxyClient 建，nil = 默认登录出口）；
 // ctx 来自 HTTP 请求，调用方取消时同步终止上游请求，不留悬挂连接。body 先落地成
 // []byte，重试才能重放（调用方本来就只传几百字节的小 JSON）。
-func doJSON(ctx context.Context, client *http.Client, method, fullURL string, extra map[string]string, body io.Reader, site loginSite) (json.RawMessage, int, error) {
+func doJSON(route loginRoute, ctx context.Context, method, fullURL string, extra map[string]string, body io.Reader, site loginSite) (json.RawMessage, int, error) {
 	var payload []byte
 	if body != nil {
 		b, err := io.ReadAll(io.LimitReader(body, 1<<20))
@@ -221,7 +221,7 @@ func doJSON(ctx context.Context, client *http.Client, method, fullURL string, ex
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt) * 400 * time.Millisecond)
 		}
-		data, status, err := doJSONOnce(ctx, client, method, fullURL, extra, payload, site)
+		data, status, err := doJSONOnce(route, ctx, method, fullURL, extra, payload, site)
 		if err == nil {
 			return data, status, nil
 		}
@@ -234,7 +234,7 @@ func doJSON(ctx context.Context, client *http.Client, method, fullURL string, ex
 }
 
 // doJSONOnce 单次尝试（不做重试）。
-func doJSONOnce(ctx context.Context, client *http.Client, method, fullURL string, extra map[string]string, body []byte, site loginSite) (json.RawMessage, int, error) {
+func doJSONOnce(route loginRoute, ctx context.Context, method, fullURL string, extra map[string]string, body []byte, site loginSite) (json.RawMessage, int, error) {
 	var rdr io.Reader
 	if body != nil {
 		rdr = bytes.NewReader(body)
@@ -245,10 +245,7 @@ func doJSONOnce(ctx context.Context, client *http.Client, method, fullURL string
 	}
 	commonHeaders(req, site)
 	applyHeaders(req, extra)
-	if client == nil {
-		client = loginHTTP
-	}
-	resp, err := client.Do(req)
+	resp, err := route.do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -327,6 +324,90 @@ func loginDeviceToken() string {
 	return ""
 }
 
+// loginRoute 一次登录（加号）的出站出口。零值 = 直连（loginHTTP 原样出网）；
+// proxyID 非空 = 这次登录的每个端点都钉在该节点上，落盘后写成该号的固定绑定。
+type loginRoute struct {
+	pool    *proxypool.Manager
+	proxyID string
+
+	// client 请求体里显式指定的出口（POST /panel/api/login/start 的 proxy 字段）。
+	// 非 nil 时压过号池挑选：手工指定的出口优先，且不再往号池节点上钉绑定
+	// ——那次登录不是号池挑的，钉上去等于谎报来路。
+	client *http.Client
+}
+
+// do 发一次登录请求：没钉节点就走 loginHTTP 的直连传输，否则经指定节点。
+//
+// 经代理时用的是该节点的传输层（与其它出站同一套 TLS 指纹、超时与连接池），
+// 不再沿用 loginHTTP 的 Go 原生握手：代理隧道上必须由我们自己的指纹拨号，
+// 否则 net/http 会改用它的原生 CONNECT 握手（见 proxypool.transportLocked）。
+// 直连分支原样保留 loginHTTP——那套「禁 h2 + 分档超时」是 2026-10-24 的实案结论
+// （默认 transport 的半死 h2 流会让登录卡到总超时），一个字节都不能丢。
+func (r loginRoute) do(req *http.Request) (*http.Response, error) {
+	if r.client != nil {
+		// 显式指定的出口（含 socks5h）：用它自己的传输层，绝不回落直连。
+		return r.client.Do(req)
+	}
+	if r.pool == nil || r.proxyID == "" {
+		return loginHTTP.Do(req)
+	}
+	return r.pool.DoPinned(loginHTTP, req, r.proxyID)
+}
+
+// pickLoginRoute 给这次加号选出口：号池里有启用节点就随机钉一条。
+//
+// 返回零值（直连）只有两种情况：池里一条启用节点都没有，或运维用
+// features.login_bind_proxy 显式关掉了这条能力。其余情况一律经代理——
+// 登录是整条链路里最不该露机房 IP 的一步，也是唯一「还没有 uid 可查绑定」
+// 的一步（selectLocked 的三档查表在这里全落空，所以必须另行选）。
+func (p *Panel) pickLoginRoute() loginRoute {
+	if p.cfg.ProxyPool == nil || !p.loginBindEnabled() {
+		return loginRoute{}
+	}
+	id := p.cfg.ProxyPool.PickForLogin()
+	if id == "" {
+		log.Printf("panel: 号池没有启用中的出口，本次登录走直连（先用面板加节点可避免）")
+		return loginRoute{}
+	}
+	return loginRoute{pool: p.cfg.ProxyPool, proxyID: id}
+}
+
+// loginBindEnabled 加号是否绑定号池出口（features.login_bind_proxy，缺省 true）。
+//
+// 快照里存的是取反的 LoginBindOff，这样零值 = 开启：没接 livecfg 的裸用路径与
+// 单测不必初始化就保持「绑定」这一默认行为。
+func (p *Panel) loginBindEnabled() bool {
+	if p.cfg.Live == nil {
+		return true
+	}
+	return !p.cfg.Live.Load().LoginBindOff
+}
+
+// loginRouteLabel 出口的可读描述（日志与响应回显用，不含凭据）。
+func (p *Panel) loginRouteLabel(r loginRoute) string {
+	if r.client != nil {
+		return "代理 指定"
+	}
+	if r.pool == nil || r.proxyID == "" {
+		return "直连"
+	}
+	if name := r.pool.NodeLabel(r.proxyID); name != "" {
+		return "代理 " + name
+	}
+	return "代理"
+}
+
+// bindLoginProxy 把新号钉在本次登录用的节点上（固定绑定，压过 realm 默认与随机池）。
+//
+// 失败只记日志、不判登录失败：凭据已经落盘，号是可用的；绑定失败最多让它按
+// realm 默认出网，用户还能在面板里手动补一次。
+func bindLoginProxy(m *proxypool.Manager, uid, proxyID string) error {
+	if m == nil || uid == "" || proxyID == "" {
+		return nil
+	}
+	return m.Bind(uid, proxypool.Binding{Mode: "fixed", ProxyID: proxyID})
+}
+
 // loginStart 发起设备授权：POST auth/state 拿授权 URL。
 // body 可带 {"site":"cn"|"intl"|"workbuddy"}（官方域表，缺省 cn）；
 // 兼容老前端 {"realm":"global"} → 旧桌面端 workbuddy.ai（零回归）。
@@ -372,8 +453,15 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 		defer client.CloseIdleConnections()
 	}
 	epState, _, _, _ := loginEndpointsFor(site)
+	// 出口先定下来：auth/state 就是加号的第一个出站，直连与经代理在这里分岔，
+	// 后面 token/account 必须与它同一条（见 loginRoute）。
+	route := p.pickLoginRoute()
+	if client != loginHTTP {
+		// 请求体显式指定出口：压过号池随机挑选，且不钉任何节点（这次不是号池挑的）。
+		route = loginRoute{client: client}
+	}
 	// auth/state：真机带 x-device-token（取到才发）+ x-custom-channel-id + 四个 x-no-*。
-	data, status, err := doJSON(r.Context(), client, http.MethodPost, epState, stateHeaders(site, loginDeviceToken()), bytes.NewReader([]byte("{}")), site)
+	data, status, err := doJSON(route, r.Context(), http.MethodPost, epState, stateHeaders(site, loginDeviceToken()), bytes.NewReader([]byte("{}")), site)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, fmt.Sprintf("auth state (upstream %d): %v", status, err))
 		return
@@ -395,14 +483,18 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 			delete(p.logins, s)
 		}
 	}
-	sess := loginSession{created: time.Now(), realm: site.Realm, site: site.ID}
-	if client != loginHTTP {
-		sess.client = client
+	sess := loginSession{created: time.Now(), realm: site.Realm, site: site.ID, proxyID: route.proxyID}
+	if route.client != nil {
+		// 显式 proxy：会话持有它，且不钉号池节点（两者互斥，proxyID 已在上一步清空）。
+		sess.client = route.client
+		sess.proxyID = ""
 	}
 	p.logins[st.State] = sess
 	p.loginMu.Unlock()
-	log.Printf("panel: 发起 OAuth 添加账号 realm=%s site=%s（state=%s...）", site.Realm, site.ID, st.State[:min(8, len(st.State))])
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State, "realm": site.Realm, "site": site.ID})
+	log.Printf("panel: 发起 OAuth 添加账号 realm=%s site=%s 出口=%s（state=%s...）",
+		site.Realm, site.ID, p.loginRouteLabel(route), st.State[:min(8, len(st.State))])
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State,
+		"realm": site.Realm, "site": site.ID, "proxy": p.loginRouteLabel(route)})
 }
 
 // logPollOnce 上游轮询结果变了才落一行日志（state 前缀 + 上游原文）。
@@ -479,17 +571,19 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}()
 	pollSite := siteOrDefault(sess.site)
 	_, epToken, epAcct, _ := loginEndpointsFor(pollSite)
-	client := loginHTTP
+	// 与 loginStart 同一条出口：auth/state 在 A 出口签发、token/account 从 B 出口取，
+	// 在上游看来是两次无关的访问（同一 state 换了来源 IP）。
+	route := loginRoute{pool: p.cfg.ProxyPool, proxyID: sess.proxyID}
 	if sess.client != nil {
-		client = sess.client
-		defer client.CloseIdleConnections()
+		route = loginRoute{client: sess.client}
+		defer route.client.CloseIdleConnections()
 	}
 
 	// auth/token 是权威登录状态端点。官方码表语义：
 	//   11217（RetryFetchToken）→ 还没登完，继续轮询；
 	//   12005/11212/11216（席位满/许可证过期/试用到期）→ 终态，立刻把上游 msg
 	//   抛给前端并停轮询（官方 SignLicenseError 行为），不再空转到 TTL。
-	tokRaw, _, err := doJSON(r.Context(), client, http.MethodGet, epToken+url.QueryEscape(state), tokenHeaders(pollSite), nil, pollSite)
+	tokRaw, _, err := doJSON(route, r.Context(), http.MethodGet, epToken+url.QueryEscape(state), tokenHeaders(pollSite), nil, pollSite)
 	if err != nil {
 		var envErr *loginEnvelopeError
 		if errors.As(err, &envErr) && loginCodeFatal(envErr.Code) {
@@ -529,7 +623,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		EnterpriseID string `json:"enterpriseId"`
 		Nickname     string `json:"nickname"`
 	}
-	acctRaw, _, errAcct := doJSON(r.Context(), client, http.MethodGet, epAcct+url.QueryEscape(state), accountHeaders(pollSite, tok.AccessToken), nil, pollSite)
+	acctRaw, _, errAcct := doJSON(route, r.Context(), http.MethodGet, epAcct+url.QueryEscape(state), accountHeaders(pollSite, tok.AccessToken), nil, pollSite)
 	if errAcct == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	} else {
@@ -608,6 +702,19 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	p.cfg.Pool.Hold(acct.UID)   // 但新号不直接进选号池：hold 待确认，解冻也清不掉
 	log.Printf("panel: 新号待确认 uid=%s（已暂停选号，确认可用后点「恢复选号」）", acct.UID)
 
+	// 出口随号落定：这次登录用的节点立刻写成该号的固定绑定，下面的注册激活/签到/
+	// 余额刷新以及之后的一切任务都跟着它走。顺序不能挪到这些调用之后——它们本身就
+	// 是出站请求，晚一步就等于「登录藏了 IP、紧接着用机房 IP 做第一件事」。
+	bound := ""
+	if route.proxyID != "" {
+		if err := bindLoginProxy(p.cfg.ProxyPool, acct.UID, route.proxyID); err != nil {
+			log.Printf("panel: 登录出口绑定失败 uid=%s proxy=%s: %v", acct.UID, route.proxyID, err)
+		} else {
+			bound = p.loginRouteLabel(route)
+			log.Printf("panel: 登录出口已绑定 uid=%s → %s（此后任务/聊天共用该出口）", acct.UID, bound)
+		}
+	}
+
 	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
 	// realm 分支：CN 走 DailyCheckin；global 无 CN 签到体系，改为注册激活 + trial 领取
 	// （D4 门控同 scheduler：CN 任务端点对 global 不发起任何调用）。
@@ -673,6 +780,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		"credits_total":   total,
 		"checkin_message": checkinMsg,
 		"balance_error":   balanceErr,
+		"proxy":           bound,
 	})
 }
 

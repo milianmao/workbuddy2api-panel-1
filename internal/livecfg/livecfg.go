@@ -25,6 +25,10 @@ type Snapshot struct {
 	// NarrationOff 预告式收尾救援是否被关闭（features.narration_enabled 取反）。
 	// 取反是为了让零值 = 开启：没接 livecfg 的裸用/测试路径不必初始化就保持既有行为。
 	NarrationOff bool
+	// LoginBindOff 加号（OAuth 登录）是否**不**绑定号池出口（features.login_bind_proxy
+	// 取反）。取反是为了让零值 = 绑定：没接 livecfg 的裸用/测试路径不必初始化就保持
+	// 默认行为（登录经号池出口，落盘后钉成该号的固定绑定）。
+	LoginBindOff bool
 	// ImportAutoBindOff 导入（cockpit 批量导入）后自动绑定代理是否被关闭
 	// （panel.import_auto_bind_proxy 取反）。取反同 NarrationOff：零值 = 开启。
 	// 关掉后导入的号保持未绑定（走 realm 默认 / 随机池 / 直连）。

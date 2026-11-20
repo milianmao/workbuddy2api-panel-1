@@ -124,7 +124,7 @@ func TestLoginProxyHTTPS(t *testing.T) {
 	}
 	defer client.CloseIdleConnections()
 	client.Transport.(*http.Transport).TLSClientConfig = up.Client().Transport.(*http.Transport).TLSClientConfig
-	data, _, err := doJSON(t.Context(), client, http.MethodPost, up.URL, nil, strings.NewReader("{}"), siteOrDefault(loginsite.SiteCN))
+	data, _, err := doJSON(loginRoute{client: client}, t.Context(), http.MethodPost, up.URL, nil, strings.NewReader("{}"), siteOrDefault(loginsite.SiteCN))
 	if err != nil || !strings.Contains(string(data), "https-proxy") || connects.Load() != 1 {
 		t.Fatalf("HTTPS 未经代理隧道返回授权信息: data=%s CONNECT=%d err=%v", data, connects.Load(), err)
 	}
