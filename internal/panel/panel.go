@@ -94,7 +94,7 @@ type Config struct {
 	// Proxypool 代理池（账号级出站代理；nil = 代理相关接口返回 501，overview 不注入
 	// proxy 字段）。panel 同时持有 pool（绑定关系）与 proxypool（节点本体），在
 	// proxy.go 做视图合并。
-	Proxypool *proxypool.Manager
+	ProxyPool *proxypool.Manager
 	// NodeBridge 机场订阅桥：把 vless/hysteria2 节点变成上游池能吃的 socks5 URL。
 	NodeBridge *nodebridge.Bridge
 	// ModelFallback 模型降级路由表（读 live 快照，支持热更）。nil = 未配置。
@@ -793,8 +793,8 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	var cnAcct, globalAcct *auth.Auth // 供下方模型繁忙度复用同一批账号
 	// 直连判定用 proxypool 的真实绑定（池条目上的 proxyID 只是镜像，可能滞后）。
 	probeDirect := func(uid string) bool {
-		if p.cfg.Proxypool != nil {
-			return p.cfg.Proxypool.ExitKey(uid) == ""
+		if p.cfg.ProxyPool != nil {
+			return p.cfg.ProxyPool.ExitKey(uid) == ""
 		}
 		return p.cfg.Pool.AccountProxy(uid) == ""
 	}

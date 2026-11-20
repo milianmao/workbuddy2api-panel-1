@@ -99,7 +99,7 @@ func TestOverviewTodayCreditsMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(pp.Close)
-	pnProxy := New(Config{Version: "test", Pool: newPool(), Proxypool: pp, Usage: rec})
+	pnProxy := New(Config{Version: "test", Pool: newPool(), ProxyPool: pp, Usage: rec})
 	gotProxy := get(pnProxy)
 	wantCredits(t, gotProxy, "u1", 2)
 	wantCredits(t, gotProxy, "u2", 0)
@@ -169,7 +169,7 @@ func TestOverviewCreditsKeepsProxySemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := newPool()
-	m := rowsOf(New(Config{Version: "test", Pool: p, Proxypool: pp}))
+	m := rowsOf(New(Config{Version: "test", Pool: p, ProxyPool: pp}))
 	if r := m["u1"]; r.ProxyTag != "127.0.0.1:1" || !r.ProxyOK {
 		t.Fatalf("u1 绑定节点未注入: %+v", r)
 	}

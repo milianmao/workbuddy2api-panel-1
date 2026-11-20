@@ -54,11 +54,11 @@ type subItem struct {
 
 // proxiesList GET /panel/api/proxies → {ok, proxies:[...], subs:[...]}。
 func (p *Panel) proxiesList(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Proxypool == nil {
+	if p.cfg.ProxyPool == nil {
 		writeErr(w, http.StatusNotImplemented, "proxypool not available")
 		return
 	}
-	snap := p.cfg.Proxypool.Snapshot()
+	snap := p.cfg.ProxyPool.Snapshot()
 	items := make([]proxyItem, 0, len(snap.Proxies))
 	for _, v := range snap.Proxies {
 		it := proxyItem{
@@ -101,7 +101,7 @@ func (p *Panel) proxiesList(w http.ResponseWriter, r *http.Request) {
 // proxiesImport POST /panel/api/proxies {text} → {ok,total,imported,skipped,errors}。
 // 只接受代理 URL（http/https/socks5/socks5h），一行一个——机场 Clash 订阅请走订阅接口。
 func (p *Panel) proxiesImport(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Proxypool == nil {
+	if p.cfg.ProxyPool == nil {
 		writeErr(w, http.StatusNotImplemented, "proxypool not available")
 		return
 	}
@@ -112,7 +112,7 @@ func (p *Panel) proxiesImport(w http.ResponseWriter, r *http.Request) {
 		writeDecodeErr(w, err)
 		return
 	}
-	res, err := p.cfg.Proxypool.Import(req.Text)
+	res, err := p.cfg.ProxyPool.Import(req.Text)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -138,11 +138,11 @@ func (p *Panel) proxiesImport(w http.ResponseWriter, r *http.Request) {
 
 // proxyDelete DELETE /panel/api/proxies/{id}（绑定该节点的账号自动解绑）。
 func (p *Panel) proxyDelete(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Proxypool == nil {
+	if p.cfg.ProxyPool == nil {
 		writeErr(w, http.StatusNotImplemented, "proxypool not available")
 		return
 	}
-	if err := p.cfg.Proxypool.Delete(r.PathValue("id")); err != nil {
+	if err := p.cfg.ProxyPool.Delete(r.PathValue("id")); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
@@ -151,14 +151,14 @@ func (p *Panel) proxyDelete(w http.ResponseWriter, r *http.Request) {
 
 // proxyToggle POST /panel/api/proxies/{id}/toggle → {ok,enabled}。
 func (p *Panel) proxyToggle(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Proxypool == nil {
+	if p.cfg.ProxyPool == nil {
 		writeErr(w, http.StatusNotImplemented, "proxypool not available")
 		return
 	}
 	id := r.PathValue("id")
 	var cur bool
 	found := false
-	for _, v := range p.cfg.Proxypool.Snapshot().Proxies {
+	for _, v := range p.cfg.ProxyPool.Snapshot().Proxies {
 		if v.ID == id {
 			cur, found = v.Enabled, true
 			break
@@ -169,7 +169,7 @@ func (p *Panel) proxyToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next := !cur
-	if err := p.cfg.Proxypool.Update(id, proxypool.Input{Enabled: &next}); err != nil {
+	if err := p.cfg.ProxyPool.Update(id, proxypool.Input{Enabled: &next}); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -178,11 +178,11 @@ func (p *Panel) proxyToggle(w http.ResponseWriter, r *http.Request) {
 
 // proxyTest POST /panel/api/proxies/{id}/test —— 异步探测，结果由列表轮询回显。
 func (p *Panel) proxyTest(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Proxypool == nil {
+	if p.cfg.ProxyPool == nil {
 		writeErr(w, http.StatusNotImplemented, "proxypool not available")
 		return
 	}
-	if err := p.cfg.Proxypool.RequestCheck(r.PathValue("id")); err != nil {
+	if err := p.cfg.ProxyPool.RequestCheck(r.PathValue("id")); err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return
 	}
@@ -191,7 +191,7 @@ func (p *Panel) proxyTest(w http.ResponseWriter, r *http.Request) {
 
 // proxiesTestSel POST /panel/api/proxies/test_sel {ids} —— 批量异步探测。
 func (p *Panel) proxiesTestSel(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Proxypool == nil {
+	if p.cfg.ProxyPool == nil {
 		writeErr(w, http.StatusNotImplemented, "proxypool not available")
 		return
 	}
@@ -204,7 +204,7 @@ func (p *Panel) proxiesTestSel(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]map[string]any, 0, len(req.IDs))
 	for _, id := range req.IDs {
-		if err := p.cfg.Proxypool.RequestCheck(id); err != nil {
+		if err := p.cfg.ProxyPool.RequestCheck(id); err != nil {
 			results = append(results, map[string]any{"id": id, "ok": false, "error": err.Error()})
 			continue
 		}
@@ -319,14 +319,14 @@ func (p *Panel) subscriptionDelete(w http.ResponseWriter, r *http.Request) {
 
 // importBridgeNodes 把桥当前的 socks5 出口推进上游池（幂等：同 URL 视为 duplicate）。
 func (p *Panel) importBridgeNodes() int {
-	if p.cfg.NodeBridge == nil || p.cfg.Proxypool == nil {
+	if p.cfg.NodeBridge == nil || p.cfg.ProxyPool == nil {
 		return 0
 	}
 	text := p.cfg.NodeBridge.Lines()
 	if text == "" {
 		return 0
 	}
-	res, err := p.cfg.Proxypool.Import(text)
+	res, err := p.cfg.ProxyPool.Import(text)
 	if err != nil {
 		log.Printf("panel: import bridge nodes failed: %v", err)
 		return 0
@@ -349,10 +349,10 @@ func (p *Panel) importBridgeNodes() int {
 // 触发点：订阅新建/同步之后 —— Import 只增不删，不清就会留下永远探不通的僵尸行。
 func (p *Panel) reconcileBridgePool() proxypool.ReconcileResult {
 	var res proxypool.ReconcileResult
-	if p.cfg.NodeBridge == nil || p.cfg.Proxypool == nil {
+	if p.cfg.NodeBridge == nil || p.cfg.ProxyPool == nil {
 		return res
 	}
-	res, err := p.cfg.Proxypool.Reconcile(p.cfg.NodeBridge.Keep(), p.cfg.NodeBridge.TagForURL)
+	res, err := p.cfg.ProxyPool.Reconcile(p.cfg.NodeBridge.Keep(), p.cfg.NodeBridge.TagForURL)
 	if err != nil {
 		log.Printf("panel: proxy pool reconcile failed: %v", err)
 		return proxypool.ReconcileResult{}
@@ -372,7 +372,7 @@ func (p *Panel) reconcileBridgePool() proxypool.ReconcileResult {
 // body {"mode":"direct"} | {"mode":"random"} | {"mode":"fixed","proxy_id":"..."}
 // 分区默认出口（issue #39 P3）：账号没显式绑定时按 realm 取它。
 func (p *Panel) realmProxy(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Proxypool == nil {
+	if p.cfg.ProxyPool == nil {
 		writeErr(w, http.StatusNotImplemented, "proxypool not available")
 		return
 	}
@@ -404,7 +404,7 @@ func (p *Panel) realmProxy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "mode must be direct, random or fixed")
 		return
 	}
-	if err := p.cfg.Proxypool.BindRealm(realm, bind); err != nil {
+	if err := p.cfg.ProxyPool.BindRealm(realm, bind); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -415,7 +415,7 @@ func (p *Panel) realmProxy(w http.ResponseWriter, r *http.Request) {
 // body {"proxy_id":"abc"}（绑定固定出口）/ {"proxy_id":""}（解绑=默认随机）
 // / {"mode":"direct"}（强制直连）。
 func (p *Panel) accountBindProxy(w http.ResponseWriter, r *http.Request) {
-	if p.cfg.Pool == nil || p.cfg.Proxypool == nil {
+	if p.cfg.Pool == nil || p.cfg.ProxyPool == nil {
 		writeErr(w, http.StatusNotImplemented, "pool not available")
 		return
 	}
@@ -439,7 +439,7 @@ func (p *Panel) accountBindProxy(w http.ResponseWriter, r *http.Request) {
 	} else if req.ProxyID != "" {
 		if p.cfg.NodeBridge != nil {
 			url := ""
-			for _, v := range p.cfg.Proxypool.Snapshot().Proxies {
+			for _, v := range p.cfg.ProxyPool.Snapshot().Proxies {
 				if v.ID == req.ProxyID {
 					if m, ok := p.cfg.NodeBridge.Meta(v.URL); ok {
 						proxyTag = m.Tag
@@ -455,7 +455,7 @@ func (p *Panel) accountBindProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		bind = proxypool.Binding{Mode: "fixed", ProxyID: req.ProxyID}
 	}
-	if err := p.cfg.Proxypool.Bind(uid, bind); err != nil {
+	if err := p.cfg.ProxyPool.Bind(uid, bind); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -515,8 +515,8 @@ func (p *Panel) overviewAccounts() []accountOverview {
 	var snap proxypool.Snapshot
 	var tags map[string]string
 	var enabled map[string]bool
-	if p.cfg.Proxypool != nil {
-		snap = p.cfg.Proxypool.Snapshot()
+	if p.cfg.ProxyPool != nil {
+		snap = p.cfg.ProxyPool.Snapshot()
 		views = p.accountProxyViews(snap)
 		tags, enabled = p.proxyNodeTags(snap)
 	}

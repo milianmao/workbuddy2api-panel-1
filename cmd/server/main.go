@@ -528,7 +528,7 @@ func main() {
 		Upstream:   up,
 		Scheduler:  sch,
 		// 代理池：节点/订阅管理与账号绑定视图（nil = 相关接口 501）。
-		Proxypool:  proxySvc,
+		ProxyPool:  proxySvc,
 		NodeBridge: nodeBridge,
 		// 降级路由表：面板据此在限流提示里标注「已路由至 <等价模型>」。
 		ModelFallback: func() map[string]string { return live.Load().ModelFallback },

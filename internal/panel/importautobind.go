@@ -75,12 +75,12 @@ func (p *Panel) autoBindImported(list []importAcct) importAutoBindResult {
 		res.Reason = "panel.import_auto_bind_proxy = false（已关闭）"
 		return res
 	}
-	if p.cfg.Proxypool == nil {
+	if p.cfg.ProxyPool == nil {
 		res.Skipped = len(list)
 		res.Reason = "代理池未启用（proxypool 为空）"
 		return res
 	}
-	snap := p.cfg.Proxypool.Snapshot()
+	snap := p.cfg.ProxyPool.Snapshot()
 
 	// 出口 IP 上的账号总数：同一 IP 可能被多个节点共用（同机房多入口），
 	// 只有把这些节点加起来才是「上游看到的同一个出口」。
@@ -159,7 +159,7 @@ func (p *Panel) autoBindImported(list []importAcct) importAutoBindResult {
 			res.Skipped++
 			continue
 		}
-		if err := p.cfg.Proxypool.Bind(ia.uid, proxypool.Binding{Mode: "fixed", ProxyID: pick.id}); err != nil {
+		if err := p.cfg.ProxyPool.Bind(ia.uid, proxypool.Binding{Mode: "fixed", ProxyID: pick.id}); err != nil {
 			res.Skipped++
 			log.Printf("WARN: panel: import auto-bind uid=%s proxy=%s 绑定失败: %v", ia.uid, pick.id, err)
 			continue

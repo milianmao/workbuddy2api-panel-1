@@ -78,7 +78,7 @@ func newProxyFixtureWith(t *testing.T, raws ...map[string]any) *proxyFixture {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "u1", AccessToken: "at"})
 	p.Add(&auth.Auth{UID: "u2", AccessToken: "at"})
-	pn := New(Config{Version: "test", Pool: p, Proxypool: pp, NodeBridge: br})
+	pn := New(Config{Version: "test", Pool: p, ProxyPool: pp, NodeBridge: br})
 	return &proxyFixture{pn: pn, p: p, pp: pp, br: br}
 }
 
