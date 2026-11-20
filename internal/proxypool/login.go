@@ -70,6 +70,25 @@ func (m *Manager) NodeLabel(id string) string {
 	return shortID(id)
 }
 
+// NodeURL 返回节点的出站 URL（与 Snapshot 同口径，已脱敏）；空 = 节点已不存在。
+//
+// 给面板把「号池节点 ID」翻成人能认的名字用：桥注册进来的节点 Name 只是
+// 127.0.0.1:<port>，真正的机场 tag（🇭🇰香港高速02…）在 nodebridge 的元信息里，
+// 两边只能靠 URL 对表。日志与回显里写 127.0.0.1:39584 等于没说。
+func (m *Manager) NodeURL(id string) string {
+	if id == "" {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, n := range m.data.Nodes {
+		if n.ID == id {
+			return n.URL
+		}
+	}
+	return ""
+}
+
 // shortID 日志用的 ID 前缀。
 func shortID(id string) string {
 	if len(id) > 8 {

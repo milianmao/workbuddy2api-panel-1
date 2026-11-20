@@ -29,6 +29,7 @@ import (
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/loginsite"
+	"github.com/misakano7545/workbuddy2api-panel/internal/nodebridge"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
@@ -390,6 +391,15 @@ func (p *Panel) loginRouteLabel(r loginRoute) string {
 	}
 	if r.pool == nil || r.proxyID == "" {
 		return "直连"
+	}
+	// 机场 tag 优先：桥注册的节点名只是 127.0.0.1:<port>，日志里写这个等于没说
+	// （「这号是哪个出口注册的」是加号绑出口的全部意义）。
+	if p.cfg.NodeBridge != nil {
+		if u := r.pool.NodeURL(r.proxyID); u != "" {
+			if m, ok := p.cfg.NodeBridge.Meta(u); ok && strings.TrimSpace(m.Tag) != "" {
+				return "代理 " + m.Tag
+			}
+		}
 	}
 	if name := r.pool.NodeLabel(r.proxyID); name != "" {
 		return "代理 " + name
