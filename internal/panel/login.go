@@ -29,7 +29,6 @@ import (
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
 	"github.com/misakano7545/workbuddy2api-panel/internal/loginsite"
-	"github.com/misakano7545/workbuddy2api-panel/internal/nodebridge"
 	"github.com/misakano7545/workbuddy2api-panel/internal/proxypool"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
