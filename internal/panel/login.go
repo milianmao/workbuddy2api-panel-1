@@ -724,6 +724,19 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 出口随号落定：这次登录用的节点立刻写成该号的固定绑定，下面的注册激活/签到/
+	// 余额刷新以及之后的一切任务都跟着它走。顺序不能挪到这些调用之后——它们本身就
+	// 是出站请求，晚一步就等于「登录藏了 IP、紧接着用机房 IP 做第一件事」。
+	bound := ""
+	if route.proxyID != "" {
+		if err := bindLoginProxy(p.cfg.ProxyPool, acct.UID, route.proxyID); err != nil {
+			log.Printf("panel: 登录出口绑定失败 uid=%s proxy=%s: %v", acct.UID, route.proxyID, err)
+		} else {
+			bound = p.loginRouteLabel(route)
+			log.Printf("panel: 登录出口已绑定 uid=%s → %s（此后任务/聊天共用该出口）", acct.UID, bound)
+		}
+	}
+
 	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
 	// realm 分支：CN 走 DailyCheckin；global 无 CN 签到体系，改为注册激活 + trial 领取
 	// （D4 门控同 scheduler：CN 任务端点对 global 不发起任何调用）。

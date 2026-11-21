@@ -60,6 +60,15 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 > ⚠️ 合规须知：本项目是**非官方**网关，使用 CodeBuddy 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
 
+## 合作伙伴
+
+<a href="https://www.ipwo.net/?ref=githubworkbuddy2apipanel"><img width="5120" height="601" alt="30f235b8d74c22bdf31db956230949a6" src="https://github.com/user-attachments/assets/e74e1c0a-d60f-46df-ae2f-84cbfb796db2" /></a>
+
+IPWO 住宅代理：为全球 API 连接提供灵活的网络支持。
+覆盖 195+ 个国家和地区的 9000 万+ 住宅 IP 资源，支持 HTTP(S)、SOCKS5 协议，以及国家和城市级定位。适用于 API 接入、跨境开发、网络连接测试及数据采集等场景。动态支持免费测试，静态IP低至9.9元/月/条。90折扣码：`0200`
+
+注册地址：https://www.ipwo.net/?ref=githubworkbuddy2apipanel
+
 ## 核心能力
 
 | 能力 | 说明 |
@@ -135,7 +144,7 @@ curl -s http://127.0.0.1:7863/v1/videos/1312831544-WandVideo-… \
   -H "Authorization: Bearer $WB2API_KEY"
 ```
 
-请求参数：`prompt`（必填）、`model`、`seconds`（实测 4-15）、`resolution`、`aspect_ratio`（`16:9` / `9:16` / `1:1`）、`negative_prompt`、`enable_audio`（默认 `true`）、`watermark`（默认 `true`）、`image`（图生视频，公网/签名 URL）、`last_image`（尾帧）、`wait`（缺省 `true`）、`timeout_seconds`（缺省 900，封顶 1800）。除 `wait` / `timeout_seconds` 外都原样交给上游。
+请求参数：`prompt`（必填）、`model`、`seconds`（实测 4-15）、`resolution`、`aspect_ratio`（`16:9` / `9:16` / `1:1`）、`negative_prompt`、`enable_audio`（默认 `true`）、`watermark`（默认 `true`）、`image`（图生视频，公网/签名 URL）、`last_image`（尾帧）、`reference_images` / `reference_videos` / `reference_audios`（参考素材，`["url", …]` 或上游原形 `[{"image_url": …}]` 都收，网关补成上游的对象数组）、`wait`（缺省 `true`）、`timeout_seconds`（缺省 900，封顶 1800）。除 `wait` / `timeout_seconds` 与三个 `reference_*` 的形状转换外，都原样交给上游。
 
 回执（出片后）：
 
@@ -509,7 +518,10 @@ DMG 未公证，首次打开需要右键 →「打开」。
 | **在线配置编辑（热生效）** | 面板直接改 `config.json`：API 密钥 / `soft_rate` / 脱敏开关 / 池参数 / 任务排程**立即生效**；装配期字段（listen 等）保存后提示需重启。写入采用深合并 + 原子替换，保留未知键 |
 | **积分任务体系** | 任务列表 / 接受 / 领取接口 + 面板弹窗；「一键完成」覆盖 **25 个任务**（对话 / 领养 / 桌面行为链 / 模板 / 灵感案例 / 专家召唤 / 技能尝鲜 / 主题 / 资料库等），推进进度、等待异步计分落定后**自动领奖**，纯 API 零客户端依赖 |
 | **模型繁忙度（面板）** | 「模型与档位」列出官方 `/v2/chat/busy` 的实时繁忙度（idle/normal/busy/congested/unavailable），只在 `繁忙 / 拥堵 / 不可用` 时挂色标——它解释了 chat 侧偶发的 429 / 6021 queue.full。**只读观测**：不参与选号；服务端偶发对整批回 `unknown`（实测同批重查可在 idle/unknown 间跳），故取不到就不标；同页每行另有**网关档位**下拉（首项＝模型支持的最高档，其余为具体档与 `off`；写入 `thinking.model_defaults` 精确键、保存即热生效，策略关闭时整体禁用并显示生效档）与**下游可见**开关（与 `models.hidden` 同一份黑名单：关掉的模型从 `/v1/models` 隐藏、点名调用被拒，行尾置灰并排到列表末尾） |
-| **联网检索（官方 agenttool）** | `POST /v1/search` 透传官方 `{base}/agenttool/v1/search`（`{query,max_results}` → `{results[].title/url/snippet/date,total_results}`，查询免费；对 DSH（DeepSeek Harness，按 UA 含 `deepseek-harness` 识别）额外启用 DeepSeek Search API 兼容：接受 `count` 作为条数，`date` 缺失时补 `null`、`title`/`snippet` 缺失时补空串；其余客户端保持上游原文逐字节透传）；同一 base 还提供 `POST /v1/fetch`（`{"url":"https://…"}` → `{"content":"<markdown>"}`，透传官方 `agenttool/v1/webfetch`）；加 `"deep":true` 则改走官方**综述式**检索 `agentic_search`（服务端多轮检索 + 抓页 + 带引用综述，回 `done` 帧原文：`synthesis.content` + `results` 整页正文 + `statuses` + `partial` 降级标记）——实测单次 18~66s、prompt ~48K tokens，故默认走 snippet 快路径（~1s）。另在 `/v1/messages` 与 `/v1/responses` 上落地服务端联网工具：客户端（Claude Code / Codex）只声明 `{"type":"web_search_20250305","name":"web_search"}`（或 Responses 的托管 `{"type":"web_search"}`），网关侧先让模型自己写检索词（探测）、执行检索、把结果注入上下文，再走既有流式管道出答案。Anthropic 侧按协议回报 `server_tool_use` + `web_search_tool_result` 块（含来源 URL，且**不**降级成客户端可执行的 `tool_use`）；没声明该工具的请求零额外开销；检索失败如实告知模型（不静默当成「网上没有」），联网不可用则降级为普通对话 |
+| **联网检索（官方 agenttool）** | `POST /v1/search` 透传官方 `{base}/agenttool/v1/search`（`{query,max_results}` → `{results[].title/url/snippet/date,total_results}`，查询免费；对 DSH（DeepSeek Harness，按 UA 含 `deepseek-harness` 识别）额外启用 DeepSeek Search API 兼容：接受 `count` 作为条数，`date` 缺失时补 `null`、`title`/`snippet` 缺失时补空串；其余客户端保持上游原文逐字节透传）；同一 base 还提供 `POST /v1/fetch`（`{"url":"https://…"}` → `{"content":"<markdown>"}`，透传官方 `agenttool/v1/webfetch`）。另提供 DeepSeek **官方形状的别名** `POST /v1/tools/search`、`POST /v1/tools/fetch`（官方文档的端点是 `{base}/v1/tools/search` 与 `/v1/tools/fetch`；**别名一律走 DeepSeek 兼容形状、不看 UA**，因为路径本身就是「我要官方 schema」的声明——`dsh-free-search` 这类客户端会把填的 `.../v1` 强制改写成 `.../v1/tools/search`，靠配置绕不开）。DeepSeek 官方的 `need_content` / `ori_question` / `localization` 三个字段**当前被忽略**：上游 snippet 接口没有正文开关，`need_content:true` 不报错但响应里不会有整页正文（`content` 缺省为空）；需要正文请用 `"deep":true` 走综述式检索；加 `"deep":true` 则改走官方**综述式**检索 `agentic_search`（服务端多轮检索 + 抓页 + 带引用综述，回 `done` 帧原文：`synthesis.content` + `results` 整页正文 + `statuses` + `partial` 降级标记）——实测单次 18~66s、prompt ~48K tokens，故默认走 snippet 快路径（~1s）。另在 `/v1/messages` 与 `/v1/responses` 上落地服务端联网工具：客户端（Claude Code / Codex）只声明 `{"type":"web_search_20250305","name":"web_search"}`（或 Responses 的托管 `{"type":"web_search"}`），网关侧先让模型自己写检索词（探测）、执行检索、把结果注入上下文，再走既有流式管道出答案。Anthropic 侧按协议回报 `server_tool_use` + `web_search_tool_result` 块（含来源 URL，且**不**降级成客户端可执行的 `tool_use`）；没声明该工具的请求零额外开销；检索失败如实告知模型（不静默当成「网上没有」），联网不可用则降级为普通对话 |
+| **嵌入（OpenAI 兼容）** | `POST /v1/embeddings`（`{model:"bge-m3", input}` → `data[].embedding`）。上游嵌入与对话是两套注册表，`bge-m3` 不在 `/v1/models` 目录里——搜不到不代表没有。开关 `features.embeddings_enabled`，**默认关闭**（关着回 403 `embeddings_disabled`，不是 404）；未知模型上游回 11351，本端映射成 404 `model_not_found` |
+| **语音合成 / 语音识别（官方 audio 端点）** | `POST /v1/audio/speech`（OpenAI 形状：`{input, voice?, response_format?}` → `audio/wav`，24kHz 单声道）与 `POST /v1/audio/transcriptions`（multipart，字段 `file` 或 `audio` → `{text}`）。上游是官方独立端点（`{chatBase}/v2/audio/speech` 的 SSE+PCM、`{chatBase}/agenttool/v1/asr` 的 multipart），**不在 `/v1/models` 目录里**。开关 `features.tts_enabled` / `features.asr_enabled`，**默认关闭**（关着回 403 而不是 404）；协议来自官方桌面端包内 `main/server.js` 的静态反查，已于 2026-11-20 用真号跑通 TTS→ASR 闭环（未抓包对照）。只出 `wav` / `pcm`：上游只产 PCM，声称 mp3 等于撒谎；`voice` **只有 `f191_female_cn_tts2.5_flash` 一个可用**（省略即用它），传 OpenAI 音色名（`alloy` 等）上游回 500 + code 10000 `get voice config failed`，网关按请求级错误直接透传并提示省掉 `voice`；`/v1/audio/transcriptions` 的音频上限 **3MB**（上游硬限，超过回 413 `audio_too_large`），音频必须是 WAV/WebM 等带容器头的格式——裸 PCM 上游回 502 + code 15053 `ASR recognition failed`，网关按请求级透传并提示换容器；`response_format` 认 `json`（默认）/ `text`，`srt` / `vtt` / `verbose_json` 上游没有时间戳故回 400 |
+| **托管出图（Responses `image_generation`）** | 客户端（Codex / ChatGPT 那套用法）只声明 `{"type":"image_generation"}`，网关侧先让模型**自己写提示词**（探测），再走本网关的出图管道（选号 / 白名单 / 记账与 `/v1/images/generations` 同口径），成品以 `image_generation_call` 输出项交付：`result` 是 base64，非流式插在 `output` 首位、流式在 `response.created` 之后补 `output_item.added/done`。单请求只出一张（与 `n>1` 拒绝同口径）；出图失败照样回到文本回答，但注入的是「出图接口不可用」，模型不能假装已生成。没声明该工具的请求零额外开销 |
 | **成长任务队列每日排程** | `schedule.growth_hours`（默认 `[11]`）+ `schedule.growth_enabled`：面板任务中心的执行队列按排程每日自动跑一遍（扫描待办 → accept → 动作 → 达标领奖），与手动入口共用同一队列与账号锁；`POST /admin/tasks/growth/run` 可手动补跑 |
 | **国际版每日活跃（网页通道）** | 国际版每日 30/50 积分只认「**跑完的网页 agent 会话**」——桌面身分 chat/completions 与 `/v2/report` 只点亮连登，积分不动（issue #111 实测）。排程的国际版活跃腿因此完整复刻网页端链路：`POST /console/as/conversations/` 建会话 → `GET .../{id}/session` 取沙箱 `link`/`token` → ACP over SSE（`initialize` → `session/load` → `session/set_model` → `session/prompt`）→ 轮询 `data.status` 到 `completed` → `stop`（失败再 `delete`）。三个必须照抄客户端的细节：ACP 鉴权用**沙箱 token**（账号 token 一律 401 `12801`）、走浏览器身份 UA/Origin、跑完必须收尾（单号活跃会话上限 10 条，漏收尾攒满就再也建不出会话）。模型钉 `deepseek-v4.1-flash`（国际版 x0.00，打卡不扣积分）；当日成功一次后不再重复建会话。国内版零调用 |
 | **首启自动生成配置** | 目录下无 `config.json` 时自动生成推荐配置（含 `crypto/rand` 随机 `api_key`），双击即开 |

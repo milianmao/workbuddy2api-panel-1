@@ -30,6 +30,21 @@ import (
 // ErrBadParams 皆有可能（Classify 词表不含 11133），hint 层自带判定（hint 是补充
 // 说明非权威分类，误判代价只是多一条中性补充说明）；其余走 Kind 一对一映射。
 func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
+	// 11103「Backend [x] is not supported」：模型的上游后端没启用/配置不全。上游自带的
+	// displayTips 就是「请换其他模型」，但客户端看到的那份在工作区里、日志里只剩一句
+	// 英文；这里点名「换号无用」，省掉一轮全池轮转与「账号是不是挂了」的误判。
+	if hasBusinessCode(msg, "11103") || codeMarker(strings.ToLower(msg), "11103") {
+		return "this model's backend is not enabled upstream (11103); switching accounts will not help — switch model"
+	}
+	// 音色未配置（TTS）：上游 500 + code 10000，与账号无关。必须排在 ErrBadParams
+	// 的通用文案之前，否则客户端只会看到「参数被拒」而不知道该省掉 voice。
+	if strings.Contains(strings.ToLower(msg), "get voice config failed") {
+		return `voice is not configured upstream (not an account problem); omit "voice" to use the default ` + TTSDefaultVoice
+	}
+	// 15053 ASR recognition failed：上游解不出这段音频（裸 PCM 无容器头必现，实测）。
+	if codeMarker(strings.ToLower(msg), "15053") {
+		return "upstream could not recognise this audio (15053); send a WAV or WebM container — bare PCM has no header to sniff"
+	}
 	// 11133 model_param_invalid 家族（图片回归实测：不支持图片的模型传图，或任意
 	// 参数被模型供应商拒绝）。只有请求确实带图、且目录**显式声明**该模型不支持图片
 	// 时才给「换模型」指向——目录只收录而不声明该能力（缺键）时无从判断，退中性
@@ -82,6 +97,11 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// 11151 空段：上游对「某条消息的 text 段是空串」判硬 400。出站前网关已补位，
 		// 客户端能做的是把那条空消息删掉或换新会话——重试必然复现。
 		return "request history contains an empty text block; upstream rejects it as-is — drop that message or start a new conversation"
+	case ErrModelMissing:
+		// 11102：模型 id 在上游不存在（id 大小写敏感，display name 也算不存在——实测
+		// "DeepSeek-V4.1-Flash" 全池 11102，id "deepseek-v4.1-flash" 立刻 200）。
+		// 点名「换号无用」，否则客户端会以为换个号能过。
+		return "model id does not exist upstream (ids are case-sensitive); copy the id from /v1/models — switching accounts will not help"
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
 	case ErrContentBlocked:
@@ -159,6 +179,8 @@ var frameRequestCodes = []struct {
 }{
 	{"11115", ErrPromptTooLong},
 	{"11129", ErrBadParams},
+	// 11103 后端未启用：请求级（换号无用），与 Classify 的 400 分支同口径。
+	{"11103", ErrModelParamInvalid},
 	// 11152 工具名不合规/重名：与 11129 同类（错在客户端声明的 tools），不登记就会滑到
 	// 通用 4xx → 喂连败 + 轮转全池 + 末端 503（2026-11-18 真机实测）。
 	{"11152", ErrBadParams},
