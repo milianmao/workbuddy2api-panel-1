@@ -33,8 +33,15 @@ func newImportPreviewEnv(t *testing.T) *importPreviewEnv {
 	up := &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc2(func(r *http.Request) (*http.Response, error) {
 			e.upstreamHits++
+			// 真实导入会先用 refresh 求证一次；预览绝不发请求，所以预览用例照样断言
+			// upstreamHits==0。这里回成功，让非预览用例走「已验证」的正常路径。
 			if strings.HasSuffix(r.URL.Path, "/v2/plugin/auth/token/refresh") {
 				e.refreshCalls++
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(importRefreshOK)),
+				}, nil
 			}
 			return &http.Response{
 				StatusCode: http.StatusNotFound,

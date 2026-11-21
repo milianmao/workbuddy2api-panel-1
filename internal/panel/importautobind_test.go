@@ -186,10 +186,16 @@ func TestImportCockpitAutoBindsProxy(t *testing.T) {
 	f.pn.cfg.AuthDir = t.TempDir()
 	f.pn.cfg.Upstream = &upstream.Client{
 		HTTP: &http.Client{Transport: roundTripFunc2(func(r *http.Request) (*http.Response, error) {
+			status, body := http.StatusNotFound, `{"code":404,"msg":"not found"}`
+			if strings.HasSuffix(r.URL.Path, "/v2/plugin/auth/token/refresh") {
+				// 导入会先用 refresh 求证一次；假上游若不认这个端点就会被判 dead/无判词。
+				// 这里回成功（含 expiresIn），让落盘走「已验证」这条正常路径。
+				status, body = http.StatusOK, importRefreshOK
+			}
 			return &http.Response{
-				StatusCode: http.StatusNotFound,
+				StatusCode: status,
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader(`{"code":404,"msg":"not found"}`)),
+				Body:       io.NopCloser(strings.NewReader(body)),
 			}, nil
 		})},
 		ChatBaseCN: "https://cn.example", WebBaseCN: "https://cn.example", BillingBaseCN: "https://cn.example",

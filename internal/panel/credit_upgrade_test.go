@@ -107,9 +107,15 @@ func (f *upgFakeBilling) callCount(uid string) int {
 
 func (f *upgFakeBilling) handle(w http.ResponseWriter, r *http.Request) {
 	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	// refresh 不计入 calls：calls 的语义是「这个账号被业务接口打了几次」
+	// （余额 / 企业额度 / 签到）。导入前的令牌求证也是 refresh，算进来会让
+	// 「只查了一次余额、没发签到」这类断言失真。
+	isRefresh := strings.HasSuffix(r.URL.Path, "/v2/plugin/auth/token/refresh")
 	f.mu.Lock()
 	uid := f.tokens[tok]
-	f.calls[uid]++
+	if !isRefresh {
+		f.calls[uid]++
+	}
 	fail := f.fail[uid]
 	remain := f.remain[uid]
 	used := f.entUsed[uid]
