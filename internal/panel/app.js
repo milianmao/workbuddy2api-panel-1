@@ -2673,7 +2673,9 @@ $('btnImportCommit').onclick = async () => {
     $('importDone').textContent = '导入完成（' + label + '）：新增 ' + (d.creates || 0)
       + ' 个，覆盖 ' + (d.overwrites || 0) + ' 个'
       + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '')
-      + (d.warnings && d.warnings.length ? '；其中 ' + d.warnings.length + ' 个凭据落盘失败（新令牌只在内存里，请检查凭证目录后重新导入）' : '');
+      + (d.warnings && d.warnings.length ? '；其中 ' + d.warnings.length + ' 个凭据落盘失败（新令牌只在内存里，请检查凭证目录后重新导入）' : '')
+      + (d.rt_dead && d.rt_dead.length ? '；⚠ ' + d.rt_dead.length + ' 个号 refresh token 已失效（只剩 access token 撑着），到期前必须重新登录：' + d.rt_dead.map(x => x.uid.slice(0, 8) + '(' + x.days_left + 'd)').join(' ') : '')
+      + (d.unverified && d.unverified.length ? '；另有 ' + d.unverified.length + ' 个号未能求证（网络/超时），已按原样入池' : '');
     if (d.errors && d.errors.length) console.warn('import errors:', d.errors);
     importPending = null;
     $('btnImportCommit').hidden = true;
@@ -2699,8 +2701,11 @@ function renderImportPreview(label, d) {
   const bits = ['新增 ' + (d.creates || 0) + ' 个', '覆盖 ' + (d.overwrites || 0) + ' 个'];
   if (d.skipped) bits.push('跳过 ' + d.skipped + ' 个');
   let html = '<div class="hint"><b>' + esc(label) + '</b> · 共 ' + (d.total || 0) + ' 条：' + bits.join('，') + '</div>';
-  if (d.overwrites) {
-    html += '<div class="hint" style="font-size:12px">覆盖项会先用 refresh 向上游求证新凭据可用，通过才写盘；不通过则保留原有凭据。</div>';
+  html += '<div class="hint" style="font-size:12px">真实导入时每个号都会先用自己的 refresh token 向上游求证一次（新增与覆盖都验）：'
+    + '通过的直接写盘（存的是轮换后的新令牌）；refresh 已失效但 access token 还没过期的照收，'
+    + '只在结果里单列出来提醒你到期前重登；两者都已过期的号直接跳过、不导入。</div>';
+  if (d.warnings && d.warnings.length) {
+    html += '<div class="hint" style="font-size:12px;color:var(--warn)">' + esc(d.warnings[0]) + '</div>';
   }
   const errs = d.errors || [];
   if (errs.length) {

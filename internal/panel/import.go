@@ -62,7 +62,8 @@ type cockpitAccount struct {
 // 多个文件是「整体事务」：任一文件不是合法 JSON 或没有任何账号就整体 400，不做
 // 「先把前面导进去」（导入不可逆，半成功最难收拾）。
 //
-// 返回 {ok, total, imported, skipped, errors, creates, overwrites, dry_run}。
+// 返回 {ok, total, imported, skipped, errors, creates, overwrites, dry_run,
+// rt_dead, unverified, auto_bind}。rt_dead / unverified 见下方求证回调。
 func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeErr(w, http.StatusBadRequest, "parse form: "+err.Error())
@@ -124,7 +125,9 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	var total, imported, skipped, creates, overwrites int
 	var errs, warnings []string
 	seenUID := map[string]string{} // uid -> 首次出现的文件，用于批内去重
-	var toVerify []importAcct      // 池里已有、要覆盖凭据的号：先求证再落盘
+	var toVerify []importAcct      // 要 refresh 求证的号：新号与覆盖都算
+	var rtDead []rtDeadNote        // 收进来了、但 RT 已判死（AT 到期即需重登）
+	var unverified []string        // 没拿到判词（网络/5xx/未轮到），入池但未校验
 	var committed []importAcct     // 已落盘入池的号：循环后做上游动作
 
 	// commit 落盘并入池；落盘在前、入池在后：入池后选号就会用新凭据，磁盘没跟上则重启后回到旧值。
@@ -253,22 +256,53 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			imported++
 			continue
 		}
-		ia := importAcct{a: a, src: src, uid: uid, realm: realm, isNew: existing == nil}
-		if existing != nil {
-			toVerify = append(toVerify, ia) // 覆盖要先求证，统一在循环后有界并发地做
-			continue
-		}
-		commit(ia, false)
+		// 新号同样要先求证。不校验就等于把「refresh token 早已失效、只等 access token
+		// 过期」的号直接塞进池子：它会在某天忽然 401，人只知道「要重新登录了」，既说不出
+		// 是哪一批导出带进来的，也来不及补。新号与覆盖的差别只在处置（见下方回调）：
+		// 覆盖是「旧凭据还能用就别毁」，新号是「废号干脆别收」。
+		toVerify = append(toVerify, importAcct{a: a, src: src, uid: uid, realm: realm, isNew: existing == nil})
 	}
 
-	// 覆盖前求证：有界并发 + 总时限（见 verifyImportOverwrites）。每个号求证完立刻落盘入池，
-	// 不等整批——求证已把文件里的 refresh token 轮换了，拖着不提交会让它只活在内存里。
+	// 落盘前求证：每号一次 refresh，有界并发 + 总时限（见 verifyImportAccounts）。每个号求证完
+	// 立刻落盘入池，不等整批——求证已把文件里的 refresh token 轮换了，拖着不提交会让它只活在内存里。
+	//
+	// 判据是三态的 VerifySessionByRefresh（alive / dead / inconclusive），处置按新号与否分开：
+	//	alive              → 落盘（存的是轮换后的新 AT/RT）
+	//	dead + AT 仍有效   → 新号也收，但记进 rt_dead：AT 到期日就是重登死线（issue #83 实测
+	//	                     refresh 恒回 12153 而 chat 全 200，所以不能因为 RT 死就丢健康号）
+	//	dead + AT 也过期   → 新号拒收（既不能用也不能续，收进来只是一条要人伺候的死号）；
+	//	                     覆盖保留原有凭据
+	//	inconclusive/未轮到 → 没有判词就不能丢号：新号照常收但记进 unverified，覆盖保留旧凭据
 	if len(toVerify) > 0 {
 		ctx, cancel := context.WithTimeout(r.Context(), importVerifyBudget)
-		p.verifyImportOverwrites(ctx, toVerify, func(k int, verdict upstream.VerifyVerdict, ran bool) {
+		p.verifyImportAccounts(ctx, toVerify, func(k int, verdict upstream.VerifyVerdict, ran bool) {
 			ia := toVerify[k]
 			mu.Lock()
 			defer mu.Unlock()
+			if ia.isNew {
+				switch {
+				case ran && verdict == upstream.VerifyAlive:
+					// verified=true：refresh 已经把 RT 轮换了，落盘失败也只能留在内存里，
+					// 不能当成「保存失败 → 跳过」——那等于把刚换到的令牌扔掉、号真死。
+					commit(ia, true)
+				case ran && verdict == upstream.VerifyDead && upstream.SessionDeadButUsable(ia.a):
+					commit(ia, false)
+					rtDead = append(rtDead, rtDeadNote{
+						UID:       ia.uid,
+						Nickname:  ia.a.Nickname,
+						Src:       ia.src,
+						ExpiresAt: ia.a.ExpiresAt,
+						DaysLeft:  daysUntil(ia.a.ExpiresAt),
+					})
+				case ran && verdict == upstream.VerifyDead:
+					skipped++
+					errs = append(errs, fmt.Sprintf("%s: refresh token 已失效且 access token 已过期，需重新登录，未导入（uid=%s）", ia.src, ia.uid))
+				default:
+					commit(ia, false)
+					unverified = append(unverified, ia.uid)
+				}
+				return
+			}
 			switch {
 			case ran && verdict == upstream.VerifyAlive:
 				commit(ia, true)
@@ -281,6 +315,19 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			}
 		})
 		cancel()
+	}
+	if len(rtDead) > 0 {
+		// 一行日志说清死线：这些号现在能用，但 AT 一过期就只能人工重登，没有自动续期。
+		parts := make([]string, 0, len(rtDead))
+		for _, d := range rtDead {
+			parts = append(parts, fmt.Sprintf("%s(%dd)", d.UID, d.DaysLeft))
+		}
+		log.Printf("panel: cockpit import 警告 %d 个号 refresh token 已失效、只剩 access token 撑着（到期前需重新登录）：%s",
+			len(rtDead), strings.Join(parts, " "))
+	}
+	if len(unverified) > 0 {
+		log.Printf("panel: cockpit import 警告 %d 个新号未经 refresh 校验就入池（网络/5xx/求证超时）：%s",
+			len(unverified), strings.Join(unverified, " "))
 	}
 
 	// 自动绑定代理：新号默认 hold（不进选号），但「人肉 resume 那天」不该再落回主机 IP
@@ -324,7 +371,9 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		"creates":    creates,
 		"overwrites": overwrites,
 		"errors":     errs,
-		"warnings":   warnings, // 已入池但凭据没能落盘的号（新令牌只在内存里）
+		"warnings":   warnings,   // 已入池但凭据没能落盘的号（新令牌只在内存里）
+		"rt_dead":    rtDead,     // RT 已判死、AT 到期前必须重登的号（已入池）
+		"unverified": unverified, // 没拿到判词、未经校验就入池的 uid
 	})
 }
 
@@ -467,6 +516,23 @@ func (p *Panel) addImportedAccount(a *auth.Auth) bool {
 	return isNew
 }
 
+// rtDeadNote 一个「refresh 已判死、靠 access token 撑着」的导入号：AT 到期日即重登死线。
+type rtDeadNote struct {
+	UID       string `json:"uid"`
+	Nickname  string `json:"nickname,omitempty"`
+	Src       string `json:"src,omitempty"`
+	ExpiresAt int64  `json:"expires_at,omitempty"` // unix 秒；0 = 文件里没给
+	DaysLeft  int    `json:"days_left"`            // 距 AT 到期还有几天（<0 表示已过期）
+}
+
+// daysUntil 把 unix 秒折成「还有几天」，用于把 AT 到期日讲成人话。
+func daysUntil(unix int64) int {
+	if unix <= 0 {
+		return 0
+	}
+	return int(time.Until(time.Unix(unix, 0)).Hours() / 24)
+}
+
 // importAcct 一个通过本地校验、待落盘的导入账号。
 type importAcct struct {
 	a        *auth.Auth
@@ -475,7 +541,7 @@ type importAcct struct {
 	isNew    bool // 池里原先没有：导入后启动新号任务
 }
 
-// importVerifyConcurrency 覆盖前求证（每号一次 refresh）的并发上限：串行时几百个已有号要等几十分钟，
+// importVerifyConcurrency 落盘前求证（每号一次 refresh）的并发上限：串行时几百个号要等几十分钟，
 // 请求先被反向代理 / 浏览器掐断；并发太高又像批量刷 refresh 端点。
 // importVerifyBudget 是求证「开工」的总时限：到点后不再为没轮到的号发 refresh，它们一律保留原凭据、
 // 由人分批重试。已发出的 refresh 不打断（打断会丢掉已轮换的令牌），所以请求最坏要等
@@ -485,9 +551,9 @@ var (
 	importVerifyBudget      = 60 * time.Second
 )
 
-// verifyImportOverwrites 用 refresh 求证导入的新凭据还活着，有界并发，开工受 ctx 约束。每号求证完立刻调
+// verifyImportAccounts 用 refresh 求证导入的凭据还活着，有界并发，开工受 ctx 约束。每号求证完立刻调
 // done（并发调用，调用方自己加锁）；没轮到的号也调一次（ran=false），保证每个号恰好一次回调。
-func (p *Panel) verifyImportOverwrites(ctx context.Context, list []importAcct, done func(k int, verdict upstream.VerifyVerdict, ran bool)) {
+func (p *Panel) verifyImportAccounts(ctx context.Context, list []importAcct, done func(k int, verdict upstream.VerifyVerdict, ran bool)) {
 	sem := make(chan struct{}, importVerifyConcurrency)
 	var wg sync.WaitGroup
 	k := 0
