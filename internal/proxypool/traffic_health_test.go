@@ -32,6 +32,7 @@ func TestSelectLockedAllowsPendingButSkipsDead(t *testing.T) {
 		t.Fatalf("判死节点应拒绝: ok=%v err=%v", ok, err)
 	}
 	// 真实流量打通一次即恢复，不等两轮探测
+	m.noteTraffic(id, true, "")
 	if n, ok, err := pick(); err != nil || !ok || n.ID != id {
 		t.Fatalf("真实流量成功后应立刻可用: %+v ok=%v err=%v", n, ok, err)
 	}

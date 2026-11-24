@@ -237,8 +237,11 @@ func TestRoutingRandomFixedDirectAndRedirect(t *testing.T) {
 		defer srv.Close()
 		ids = append(ids, addProxy(t, m, srv.URL))
 	}
-	if _, err := request("u"); !IsError(err) {
-		t.Fatal("pending pool silently used direct")
+	// pending（从未探测）不再拒单：新判据只排除**被判死**的节点，没测过的照常走代理。
+	// 这条断言原本要防的是「悄悄直连」——直连会把本机 IP 暴露给上游，那仍然不许；
+	// 所以判据从「必须报错」改成「必须经代理返回 0/1」（直连会拿到 destination 的 "direct"）。
+	if body, err := request("u"); err != nil || (body != "0" && body != "1") {
+		t.Fatalf("pending pool 应经代理而非直连: %q %v", body, err)
 	}
 	for _, id := range ids {
 		probe(t, m, id)
