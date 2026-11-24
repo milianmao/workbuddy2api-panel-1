@@ -38,6 +38,13 @@ type proxyItem struct {
 	CheckedAt int64  `json:"checked_at"`
 	Fails     int    `json:"fails"`
 	Accounts  int    `json:"accounts"`
+	// Status 探测/真实流量得出的健康结论（healthy / unhealthy / pending / disabled）。
+	// 之前这个字段根本不存在，面板与 API 都拿不到——节点在抖也只能靠翻日志猜。
+	Status string `json:"status"`
+	// LastError 最近一次失败原因（探测失败或真实请求失败），空 = 无。
+	LastError string `json:"last_error"`
+	// Successes 连续成功次数（探测 + 真实流量），用来判断「刚恢复还是本来就好」。
+	Successes int `json:"successes"`
 	// Exit 出口画像（国家 / 住宅或机房 / ISP / ASN），来自上游 3d0f293 的 ip-api 观测。
 	// 空字段 = 不知道，不是「没问题」；前端只在 ip 非空时渲染这一行。
 	Exit proxypool.ExitInfo `json:"exit"`
@@ -70,6 +77,9 @@ func (p *Panel) proxiesList(w http.ResponseWriter, r *http.Request) {
 			CheckedAt: v.CheckedAt.Unix(),
 			Fails:     v.Failures,
 			Accounts:  v.BoundCount,
+			Status:    v.Status,
+			LastError: v.LastError,
+			Successes: v.Successes,
 			Exit:      v.Exit,
 		}
 		if p.cfg.NodeBridge != nil {

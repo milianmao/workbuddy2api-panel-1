@@ -139,5 +139,5 @@ func (m *Manager) DoPinned(client *http.Client, req *http.Request, id string) (*
 		}
 		return nil, err
 	}
-	return doVia(client, req, n, tr)
+	return m.doVia(client, req, n, tr)
 }

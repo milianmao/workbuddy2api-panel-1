@@ -252,7 +252,58 @@ func (m *Manager) Do(client *http.Client, req *http.Request, uid, realm string) 
 	if !proxied {
 		return client.Do(req)
 	}
-	return doVia(client, req, n, tr)
+	return m.doVia(client, req, n, tr)
+}
+
+// trafficFailureThreshold 真实流量连续失败几次判节点死。
+//
+// 取 2 而不是 1：一次 RST / 一次超时可能是偶发（线路抖动、对端重置），
+// 连着两次打不通才值得让整个池子避开它；而探测口径的 failure_threshold 是 3，
+// 因为它本来就是合成请求、更该宽容。
+const trafficFailureThreshold = 2
+
+// noteTraffic 把一次**真实业务请求**的结果反馈给节点健康表。
+//
+// 为什么必须做这件事：探测每 60s 才跑一轮、连败 failure_threshold 次才判 unhealthy，
+// 而一个节点从「真的打不通」到「探测确认打不通」之间最多有三分钟。这段时间里
+// 所有钉在它上面的号每次被选中都白撞一次墙——现场表现就是同一条 503 反复出现。
+// 反过来，节点已经恢复也要等两轮探测才放行，恢复同样慢两分钟。
+// 真实流量是最便宜也最准的探针：打不通马上记，打通了马上放行。
+//
+// 只改健康结论，不动 lastError 之外的字段；调用方已分好「客户端自己取消」的情形，
+// 那种不算节点问题。
+func (m *Manager) noteTraffic(id string, ok bool, reason string) {
+	if id == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return
+	}
+	h := m.health[id]
+	if ok {
+		h.failures = 0
+		h.successes++
+		if h.status != "healthy" {
+			h.status = "healthy"
+			h.lastError = ""
+		}
+		m.health[id] = h
+		return
+	}
+	h.successes = 0
+	h.failures++
+	if reason != "" {
+		h.lastError = reason
+	}
+	if h.failures >= trafficFailureThreshold {
+		h.status = "unhealthy"
+		if tr := m.transports[id]; tr != nil {
+			tr.CloseIdleConnections()
+		}
+	}
+	m.health[id] = h
 }
 
 // doVia 把一次请求塞进某个节点的传输层，并把传输层失败翻译成不带凭据的 *Error。
@@ -261,7 +312,7 @@ func (m *Manager) Do(client *http.Client, req *http.Request, uid, realm string) 
 // DoPinned 直接钉节点（还没有账号的登录/注册）。两条路在「选定之后」的行为必须
 // 逐字一致——错误归类、空闲连接清理、407 判定漏一处，现象就是「经代理的任务偶尔
 // 失败但不留痕」。
-func doVia(client *http.Client, req *http.Request, n node, tr *http.Transport) (*http.Response, error) {
+func (m *Manager) doVia(client *http.Client, req *http.Request, n node, tr *http.Transport) (*http.Response, error) {
 	selected := *client
 	selected.Transport = tr
 	resp, err := selected.Do(req)
@@ -277,13 +328,20 @@ func doVia(client *http.Client, req *http.Request, n node, tr *http.Transport) (
 		if !errors.Is(err, context.Canceled) {
 			// 调用方自己取消不说明代理有问题，不清节点上别的请求能复用的空闲连接。
 			tr.CloseIdleConnections()
+			// 真实流量比探测更有说服力：这一拨就是打不通。记进健康表，让选路立刻避开
+			// （探测每 60s 一轮、连败 3 次才判死，光靠探测最多要白等三分钟）。
+			m.noteTraffic(n.ID, false, reason)
 		}
 		return nil, &Error{ProxyID: n.ID, Reason: reason, cause: err}
 	}
 	if resp.StatusCode == http.StatusProxyAuthRequired {
 		_ = resp.Body.Close()
+		m.noteTraffic(n.ID, false, "proxy authentication failed")
 		return nil, &Error{ProxyID: n.ID, Reason: "proxy authentication failed"}
 	}
+	// 拿到响应头就是「这条隧道当时通」的直接证据：立刻转回 healthy，
+	// 不必再等两轮探测（否则节点恢复后仍要白等 1–2 分钟）。
+	m.noteTraffic(n.ID, true, "")
 	resp.Body = &proxyBody{ReadCloser: resp.Body, id: n.ID, transport: tr}
 	return resp, nil
 }

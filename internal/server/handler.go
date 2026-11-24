@@ -1701,13 +1701,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				fail(acct.UID)
 				break
 			}
+			// 代理路由失败（节点被判死 / 绑定节点不可用 / 代理鉴权失败）：这不是账号的错，
+			// 也不是「整条出口链路断了」——它只是**这一个节点**的事，下一个账号很可能钉在
+			// 另一个好节点上，所以这里的正确动作是换号，而不是结束轮转。
+			//
+			// 走下面的出口级退避是错的：那条阶梯按出口共用一个计数器，而排查前它把所有
+			// 经代理的失败都记在 "direct:<realm>" 上，于是一个节点坏掉能把这个桶顶到
+			// give-up 阈值，之后同域的每个请求只要第一个被选中的号绑在那个节点上就
+			// 立刻 break —— 现场表现就是一条 try=1、do=0ms 的瞬时 503，连着刷几十条。
+			if proxypool.IsError(terr) {
+				fail(acct.UID)
+				continue
+			}
 			// 出口级归因（egress.go）：走到这里的传输层失败**只可能**是直连路径
 			// （经代理的失败是 proxypool.Error，上面已终止轮转），而直连出口由本域
 			// 全部账号共用。拨号/TLS 失败发生在上游看到这个号之前，不携带「这个号
 			// 坏了」的任何证据；记到账号头上时，一次链路抖动会顺着轮转逐个给被选中
 			// 的号记连败——hub 现场实测 4 小时 196 次 URLError 陆续降权 13 个号，
 			// 而链路只断了几秒。改记出口，退避降到秒级。
-			streak := h.cfg.Pool.NoteEgressFailure(egressKey(acct), time.Now())
+			streak := h.cfg.Pool.NoteEgressFailure(h.egressKeyFor(acct), time.Now())
 			fail(acct.UID)
 			if streak >= egressGiveUpStreak {
 				// 链路连续失败：换号只是把同样的等待与失败重复一遍（换不到别的
@@ -2761,6 +2773,21 @@ func rotateBackoff(i int, ctx context.Context) bool {
 // 一个域的抖动压住另一个域刚恢复的那几秒。经代理的失败走不到这里（proxypool.Error
 // 在上游分支已终止轮转），所以不需要节点身份；真要按节点分级，应取
 // proxypool.Error.ProxyID，而不是在账号上猜。
+// egressKeyFor 按账号**真实出口**给退避桶命名：钉了代理节点就每个节点一个桶
+// （"proxy:<节点 ID>"），没钉就退回直连口径（同域共用 "direct:<realm>"）。
+//
+// 为什么必须分开：直连出口由本域所有账号共用，一个桶控制整个域的退避是对的；
+// 但经代理时「出口」是那个节点，把 A 节点的失败记进共用桶，等于让 B、C 节点的
+// 号一起退避，几次之后整个域都在快速失败——一条坏节点就这样变成整池不可用。
+func (h *Handler) egressKeyFor(a *auth.Auth) string {
+	if a != nil && h.cfg.Upstream != nil && h.cfg.Upstream.ProxyPool != nil {
+		if id := h.cfg.Upstream.ProxyPool.ExitKey(a.UID); id != "" {
+			return "proxy:" + id
+		}
+	}
+	return egressKey(a)
+}
+
 func egressKey(a *auth.Auth) string {
 	realm := "cn"
 	if a != nil && a.Realm() != "" {

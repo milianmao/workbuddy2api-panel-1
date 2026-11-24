@@ -741,7 +741,13 @@ func (m *Manager) selectLocked(uid, realm string) (node, bool, error) {
 		if b.Mode == "fixed" && b.ProxyID != n.ID {
 			continue
 		}
-		if n.Enabled && m.health[n.ID].status == "healthy" {
+		// 只排除**被判死**的节点：healthy 与 pending（没测过）一律放行。
+		// 原来要求 == "healthy" 有两个当场可复现的恶果：①节点被探针判死的那一瞬间，
+		// 钉在它上面的号 100% 报 "no healthy proxy available"（do=0ms，请求根本没拨号）；
+		// ②进程刚起来时所有节点状态都是空的，要等 success_threshold 轮探测才转 healthy，
+		// 于是每次重启都有约两分钟「所有 fixed 号一律拒单」的假死窗口。
+		// 判死是证据，没测过不是证据。
+		if n.Enabled && m.health[n.ID].status != "unhealthy" {
 			count++
 			if rand.IntN(count) == 0 {
 				selected = n

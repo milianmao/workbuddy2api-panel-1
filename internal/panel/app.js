@@ -6230,9 +6230,16 @@ function subNameOf(id) {
 function proxyLatencyHtml(p) {
   const ms = Number(p && p.latency_ms || 0);
   const fails = Number(p && p.fails || 0);
-  const tip = p && p.checked_at ? '最近检测：' + agoUnix(p.checked_at) : '尚未测速';
-  if (ms <= 0 && fails <= 0) return '<span style="color:var(--ink-3)" title="' + esc(tip) + '">—</span>';
-  const parts = [];
+  const st = String((p && p.status) || '');
+  /* 状态前缀：探测与真实流量共同得出的结论。
+     之前面板根本拿不到这个字段，节点在抖只能翻日志猜。 */
+  const badge = st === 'unhealthy' ? '<span class="src-off">异常</span>'
+    : st === 'disabled' ? '<span class="src-off">已停用</span>'
+    : st === 'healthy' ? '<span style="color:#2e9e5b">正常</span>'
+    : '<span style="color:var(--ink-3)">待测</span>';
+  const tip = (p && p.last_error ? '最近错误：' + p.last_error + '；' : '') +
+    (p && p.checked_at ? '最近检测：' + agoUnix(p.checked_at) : '尚未测速');
+  const parts = [badge];
   if (ms > 0) parts.push(ms + ' ms');
   if (fails > 0) parts.push('<span class="src-off">失败 ' + fails + ' 次</span>');
   return '<span title="' + esc(tip) + '">' + parts.join(' · ') + '</span>';
