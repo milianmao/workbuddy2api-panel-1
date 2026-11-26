@@ -417,21 +417,26 @@ const start = src.indexOf('function renderErrorSummary');
 const end = src.indexOf('function renderRequestMetrics');
 if ([escStart, escEnd, start, end].some(v => v < 0)) throw new Error('error summary region not found');
 const els = {};
-const ctx = { String, Math, $: id => (els[id] = els[id] || { innerHTML: '', textContent: '' }) };
+const store = { 'wb2api.errReadAt': '1700000000' };
+const ctx = { String, Math, localStorage: { getItem: k => (k in store ? store[k] : null) },
+  $: id => (els[id] = els[id] || { innerHTML: '', textContent: '' }) };
 vm.createContext(ctx);
 vm.runInContext("'use strict';\n" + src.slice(escStart, escEnd) + src.slice(start, end) +
   '\nthis.renderErrorSummary=renderErrorSummary; this.esc=esc;', ctx);
 const full = 'WARN: [upstream] chat_stream acct=a(1): upstream 400 model_blocked body={"code":11102,"msg":"model [x] not found","requestId":"req-1"}';
 const short = 'WARN: keepalive a(1): boom';
 ctx.renderErrorSummary({ scanned: 2, updated_at: '12:00:00', rows: [
-  { sev: 'warn', kind: 'k1', count: 1, sample: full.slice(0, 30), sample_full: full },
-  { sev: 'warn', kind: 'k2', count: 1, sample: short },
+  { sev: 'warn', kind: 'k1', count: 1, sample: full.slice(0, 30), sample_full: full, last_unix: 1699999999 },
+  { sev: 'warn', kind: 'k2', count: 1, sample: short, last_unix: 1700000001 },
 ]});
 const body = els.errBody.innerHTML;
 process.stdout.write(JSON.stringify({
   fullInTitle: body.includes('title="' + ctx.esc(full) + '"'),
   cellTruncated: body.includes('">' + ctx.esc(full.slice(0, 30)) + '</td>'),
   fallbackTitle: body.includes('title="' + ctx.esc(short) + '"'),
+  // 已读标记之前的行灰掉，之后的行保持原样；note 里报已读条数（issue #288）
+  readDimmed: body.includes('class="is-read lv-w"') && body.split('is-read').length === 2,
+  notedReadCount: els.errNote.textContent.includes('已读 1'),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "errsum-*.cjs")
 	if err != nil {
@@ -445,7 +450,7 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("error summary title node test failed: %v\n%s", err, out)
 	}
-	const want = `{"fullInTitle":true,"cellTruncated":true,"fallbackTitle":true}`
+	const want = `{"fullInTitle":true,"cellTruncated":true,"fallbackTitle":true,"readDimmed":true,"notedReadCount":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("error summary title=%s want %s", out, want)
 	}
@@ -805,6 +810,81 @@ process.stdout.write(JSON.stringify({
 		`"barTitles":3,"bareTitles":0,"titleHasOwnReq":true,"emptyState":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("usage chart=%s\nwant %s", out, want)
+	}
+}
+
+// 「每日变化」柱状图：每根柱子必须自带 <title> 子节点。
+// 挂在 <svg> 根下（兄弟节点）时浏览器把它当整图说明，所有柱子共用第一条 ——
+// 表现是「悬停任意柱子永远是同一行」（issue #289）。故断言标题数 == 柱子数、
+// 互不相同、且全部出现在 <rect> 开闭标签之间。
+func TestAppJSDailyBarsTitlePerBar(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; daily bars test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const escStart = src.indexOf('function esc(');
+const escEnd = src.indexOf('function ago(');
+const deadStart = src.indexOf('function bhIsDead(');
+const deadEnd = src.indexOf('function disabledAge(');
+const mwStart = src.indexOf('function measureWidth(');
+const mwEnd = src.indexOf('function lineWidthFor(');
+const numStart = src.indexOf('function fmtNum(');
+const numEnd = src.indexOf('function fmtTokens(');
+const start = src.indexOf('function renderDailyBars(');
+const end = src.indexOf('function dayChangeOf(');
+if ([escStart, escEnd, deadStart, deadEnd, mwStart, mwEnd, numStart, numEnd, start, end].some(v => v < 0)) {
+  throw new Error('daily bars helpers not found');
+}
+const host = { innerHTML: '', clientWidth: 760 };
+const legendHost = { innerHTML: '' };
+const ctx = {
+  Date, Number, String, Math, RegExp, isNaN, Set, Map, Array, Object, Infinity, JSON,
+  CHART_FALLBACK_W: 760,
+  BH_COLORS: ['#111', '#222', '#333'],
+  overviewData: { accounts: [] },
+  getComputedStyle: () => ({ paddingLeft: '0', paddingRight: '0' }),
+  document: { getElementById: id => (id === 'bhDailyLegend' ? legendHost : host) },
+  $: id => (id === 'bhDailyLegend' ? legendHost : host),
+};
+vm.createContext(ctx);
+vm.runInContext("'use strict';\n" + src.slice(escStart, escEnd) + src.slice(deadStart, deadEnd) +
+  src.slice(mwStart, mwEnd) + src.slice(numStart, numEnd) + src.slice(start, end) +
+  '\nthis.renderDailyBars=renderDailyBars;', ctx);
+ctx.renderDailyBars([
+  { uid: 'a', name: 'A', daily: [{ day: '2026-11-16', change: -455, full: false }, { day: '2026-11-17', change: 0, full: true }] },
+  { uid: 'b', name: 'B', daily: [{ day: '2026-11-16', change: 120, full: true }, { day: '2026-11-17', change: -30, full: true }] },
+]);
+const svg = host.innerHTML;
+const titles = [...svg.matchAll(/<title>([\s\S]*?)<\/title>/g)].map(m => m[1]);
+process.stdout.write(JSON.stringify({
+  barCount: (svg.match(/<rect/g) || []).length,
+  closedRects: (svg.match(/<\/rect>/g) || []).length,
+  titleCount: titles.length,
+  uniqueTitles: new Set(titles).size,
+  aTitles: titles.filter(x => x.startsWith('A ')).length,
+  bTitles: titles.filter(x => x.startsWith('B ')).length,
+  incompleteWarn: titles.filter(x => x.includes('采样不完整')).length,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "daily-bars-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("daily bars node test failed: %v\n%s", err, out)
+	}
+	// 4 根柱（含 A 的零值底痕）各一条自己的标题；不完整日只有 A/11-16 那一条带警告。
+	const want = `{"barCount":4,"closedRects":4,"titleCount":4,"uniqueTitles":4,` +
+		`"aTitles":2,"bTitles":2,"incompleteWarn":1}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("daily bars=%s\nwant %s", out, want)
 	}
 }
 

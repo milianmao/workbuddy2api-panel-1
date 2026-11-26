@@ -631,7 +631,11 @@ function renderAccounts(list) {
     else if (s.daily_quota && s.daily_quota.exceeded) { cls = 'cool'; tag = '<span class="tag warn">已达每日限额</span>'; }
     else if (cool > 0) {
       cls = 'cool';
-      const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
+      // 标签按服务端给的 cool_kind 判，不比较秒数：cool_remaining_sec 是服务端
+      // 向上取整的整秒，bl 是前端后算的浮点秒，只差几十毫秒 ⇒ bl > cool_remaining_sec
+      // 恒为 false，于是「只有熔断」永远显示成「限流冷却」（issue #290）。
+      // state.go 已经算出谁截止更晚并写进 cool_kind，前端直接照抄即可。
+      const kind = s.cool_kind === 'breaker' ? '熔断'
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     }
@@ -1243,6 +1247,28 @@ $('btnTravelAll').onclick = async () => {
 $('btnActivityAll').onclick = async () => {
   try { await api('activity_all', { method: 'POST' }); toast('活跃上报已开始，结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
+};
+
+/* 导出账号（issue #287）：走 fetch+blob 而不是 location.href——设了 api_key 时裸跳转
+   带不上 Authorization 头，只会拿到 401。 */
+$('btnAccExport').onclick = async () => {
+  const btn = $('btnAccExport');
+  btn.disabled = true;
+  try {
+    const h = {};
+    const k = localStorage.getItem(LS_KEY);
+    if (k) h['Authorization'] = 'Bearer ' + k;
+    const r = await fetch('/panel/api/accounts/export', { headers: h });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || ('HTTP ' + r.status)); }
+    const url = URL.createObjectURL(await r.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'wb2api-accounts.json';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    toast('已导出（含 token，注意保管）', 'ok');
+  } catch (e) { toast('导出失败：' + e.message, 'err'); }
+  finally { btn.disabled = false; }
 };
 if ($('accRealmTabs')) {
   $('accRealmTabs').addEventListener('click', ev => {
@@ -1903,11 +1929,21 @@ async function loadLogs() {
   } catch (e) { /* 概览已提示 */ }
 }
 
-/* 错误汇总（后端 /panel/api/error_summary 已聚合+排序）：只渲染，不在这里再算。 */
+/* 错误汇总（后端 /panel/api/error_summary 已聚合+排序）：只渲染，不在这里再算。
+   「已读」标记存本机 localStorage（issue #288）：按 last_unix 比较而不是 last（HH:MM:SS
+   跨天不可比）。历史错误一直挂在表里时，靠它把「这次新增的」挑出来。 */
 function renderErrorSummary(d) {
   const rows = (d && d.rows) || [];
-  $('errBody').innerHTML = rows.length ? rows.map(r =>
-    '<tr class="' + (r.sev === 'bad' ? 'lv-e' : r.sev === 'warn' ? 'lv-w' : '') + '">' +
+  let readAt = 0, hideRead = false;
+  try {
+    readAt = Number(localStorage.getItem('wb2api.errReadAt')) || 0;
+    hideRead = localStorage.getItem('wb2api.errHideRead') === '1';
+  } catch (e) { /* 隐私模式 / 无 localStorage：一律当未读，全部显示 */ }
+  const isRead = r => readAt > 0 && r.last_unix > 0 && r.last_unix <= readAt;
+  const readN = rows.filter(isRead).length;
+  const show = hideRead ? rows.filter(r => !isRead(r)) : rows;
+  $('errBody').innerHTML = show.length ? show.map(r =>
+    '<tr class="' + (isRead(r) ? 'is-read ' : '') + (r.sev === 'bad' ? 'lv-e' : r.sev === 'warn' ? 'lv-w' : '') + '">' +
     '<td>' + esc(r.account || '—') + '</td>' +
     '<td>' + esc(r.kind) + '</td>' +
     '<td>' + esc(r.code || '—') + '</td>' +
@@ -1916,9 +1952,13 @@ function renderErrorSummary(d) {
     '<td>' + esc(r.last || '—') + '</td>' +
     '<td>' + esc(r.until || '—') + '</td>' +
     '<td class="sample" title="' + esc(r.sample_full || r.sample || '') + '">' + esc(r.sample || '') + '</td></tr>'
-  ).join('') : '<tr><td colspan="8" style="color:var(--ink-3)">窗口内没有 WARN/ERR</td></tr>';
+  ).join('') : '<tr><td colspan="8" style="color:var(--ink-3)">' +
+    (readN ? '没有未读错误（' + readN + ' 条已读被隐藏）' : '窗口内没有 WARN/ERR') + '</td></tr>';
   $('errNote').textContent = d
-    ? '扫描 ' + (d.scanned || 0) + ' 行 · ' + rows.length + ' 类 · 截至 ' + (d.updated_at || '—')
+    ? '扫描 ' + (d.scanned || 0) + ' 行 · ' + rows.length + ' 类' +
+      (readN ? ' · 已读 ' + readN : '') +
+      (hideRead ? ' · 隐藏已读' : '') +
+      ' · 截至 ' + (d.updated_at || '—')
     : '—';
 }
 
@@ -2182,6 +2222,26 @@ $('btnLogPin').onclick = () => {
   logPin = !logPin;
   $('btnLogPin').textContent = '自动滚动：' + (logPin ? '开' : '关');
 };
+
+/* 错误汇总「已读」（issue #288）：标记存本机，不动日志环——日志是排查证据，清空等于
+   把还没处理的故障也删了。标为已读后新出现的行 last_unix 更大，仍然正常显示。 */
+$('btnErrRead').onclick = () => {
+  try { localStorage.setItem('wb2api.errReadAt', String(Math.floor(Date.now() / 1000))); }
+  catch (e) { toast('本机存储不可用，标为已读未生效', 'err'); return; }
+  loadOverview(true);
+};
+$('btnErrHideRead').onclick = () => {
+  let on = false;
+  try {
+    on = localStorage.getItem('wb2api.errHideRead') === '1';
+    localStorage.setItem('wb2api.errHideRead', on ? '0' : '1');
+  } catch (e) { /* 隐私模式：翻转无效，下次渲染仍读不到标记 */ }
+  $('btnErrHideRead').textContent = '隐藏已读：' + (on ? '关' : '开');
+  loadOverview(true);
+};
+try {
+  if (localStorage.getItem('wb2api.errHideRead') === '1') $('btnErrHideRead').textContent = '隐藏已读：开';
+} catch (e) { /* 隐私模式 */ }
 
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
@@ -5422,10 +5482,14 @@ function renderDailyBars(series) {
       const x = gx + (groupW - (bw * nAcc + gap * (nAcc - 1))) / 2 + si * (bw + gap);
       const y0 = Math.min(zeroY, Y(v)), h = Math.max(1, Math.abs(Y(v) - zeroY));
       const incomplete = fullMap.get(s.uid + '|' + day);
+      // <title> 必须挂在柱子自己身上：作为 <svg> 根的直接子节点时浏览器把它当整图
+      // 说明，于是**所有柱子共用第一条**（issue #289；token 图同理，见 renderUsageChart）。
+      const tip = '<title>' + esc(s.name || s.uid.slice(0, 8)) + '  ' + esc(day) + '\n' +
+        (v > 0 ? '+' : '') + fmtNum(v) + (incomplete ? '\n⚠️ 该日采样不完整（当天未结束或中途启用）' : '') + '</title>';
       // 零值画一条中性底痕（与 buka 规范一致：0 值也要可见）
       if (v === 0) {
         out += '<rect x="' + x.toFixed(1) + '" y="' + (zeroY - 1).toFixed(1) + '" width="' + bw.toFixed(1) +
-          '" height="2" fill="var(--line)" rx="1"/>';
+          '" height="2" fill="var(--line)" rx="1">' + tip + '</rect>';
       } else {
         // 离群点（超出裁剪后的轴范围）：柱子贴边 + 顶部三角标记，
         // 让读者一眼看出「这根比轴还高」，而不是误以为它只有这么高。
@@ -5433,7 +5497,7 @@ function renderDailyBars(series) {
         out += '<rect x="' + x.toFixed(1) + '" y="' + y0.toFixed(1) + '" width="' + bw.toFixed(1) +
           '" height="' + h.toFixed(1) + '" fill="' + (v > 0 ? 'var(--ok)' : 'var(--bad)') + '"' +
           (incomplete ? ' opacity=".38" stroke="' + color + '" stroke-width="1" stroke-dasharray="2 2"' : '') +
-          ' rx="1.5"/>';
+          ' rx="1.5">' + tip + '</rect>';
         if (clippedHi || clippedLo) {
           const ty = clippedHi ? PT : PT + ih;
           out += '<path d="M' + (x + bw / 2).toFixed(1) + ' ' + (clippedHi ? ty : ty - 5).toFixed(1) +
@@ -5441,8 +5505,6 @@ function renderDailyBars(series) {
             '<title>超出纵轴范围（已裁剪），实际 ' + (v > 0 ? '+' : '') + fmtNum(v) + '</title></path>';
         }
       }
-      out += '<title>' + esc(s.name || s.uid.slice(0, 8)) + '  ' + esc(day) + '\n' +
-        (v > 0 ? '+' : '') + fmtNum(v) + (incomplete ? '\n⚠️ 该日采样不完整（当天未结束或中途启用）' : '') + '</title>';
     });
     // x 轴日期标签（稀疏）
     // 与上方「积分水位」图同一口径（天数 / 3 + 1，夹在 2~10 之间），保证可纵向对照。
