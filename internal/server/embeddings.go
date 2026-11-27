@@ -137,7 +137,9 @@ func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(raw) > 8<<20 {
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "invalid_request", "request body exceeds 8 MiB")
+		// code 与全局 readBody 的 413 对齐（同一事实两种写法会让按 payload_too_large
+		// 写分支的客户端漏掉这一条）；message 保留「8 MiB」这句，客户端才知道坎在哪。
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "request body exceeds 8 MiB")
 		return
 	}
 	var req embeddingsRequest
@@ -222,8 +224,14 @@ func (h *Handler) embeddings(w http.ResponseWriter, r *http.Request) {
 				if status < 400 || status >= 500 {
 					status = http.StatusBadRequest
 				}
-				log.Printf("embeddings realm=%s: 请求级错误 kind=%v，不再换号", realm, ue.Kind)
-				writeOpenAIError(w, status, "upstream_error", ue.Msg)
+				// 已定性成请求级，错误码就不该还叫 upstream_error（语义像 5xx，排查时看懵）；
+				// 11353 = 单条输入超 bge-m3 的 8192 token，是 embeddings 唯一的超限成因。
+				code := "upstream_error"
+				if ue.Code == 11353 {
+					code = "input_too_large"
+				}
+				log.Printf("embeddings realm=%s: 请求级错误 kind=%v code=%d，不再换号", realm, ue.Kind, ue.Code)
+				writeOpenAIError(w, status, code, ue.Msg)
 				return
 			}
 		}
